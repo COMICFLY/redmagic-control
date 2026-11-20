@@ -2,10 +2,23 @@
 
 轻量级红魔外设桌面控制中心 — **纯 Rust + Tauri v2** 原生实现（无 Node.js / 无 Electron / 无 C `hidapi` 运行时依赖，单文件 Release 仅约 9 MB），完整支持 **REDMAGIC 氘锋机械键盘 `GK001S`** 与 **REDMAGIC 电竞鼠标 `GS001S`** 的有线 / 2.4G / 蓝牙三模管理。
 
+## 界面预览
+
+![GK001S 键盘概览与性能](docs/screenshots/kb-overview.png)
+
+| 键盘灯光管理（20 种模式 + Logo 灯条） | 320×172 小屏图片选择器与裁切工作台 |
+| :---: | :---: |
+| ![GK001S 灯光管理](docs/screenshots/kb-lighting.png) | ![GK001S 小屏图片选择器](docs/screenshots/kb-screen.png) |
+
+| GS001S 鼠标 · 5 档 DPI 与传感器控制 |
+| :---: |
+| ![GS001S 鼠标概览与 DPI](docs/screenshots/ms-overview.png) |
+
 ---
 
 ## 目录
 
+- [界面预览](#界面预览)
 - [1. 支持设备与三模能力矩阵](#1-支持设备与三模能力矩阵)
 - [2. 软件架构与通信实现](#2-软件架构与通信实现)
 - [3. 官方 HID 协议运作原理](#3-官方-hid-协议运作原理)

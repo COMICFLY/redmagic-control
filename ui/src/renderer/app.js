@@ -1291,7 +1291,13 @@ async function boot() {
     state.meta = await callApi("getMeta");
     $("#app-version").textContent = `v${state.meta.version}`;
     state.devices = await callApi("listDevices");
-    state.activeId = state.devices[0]?.id || null;
+    const params = new URLSearchParams(window.location.search);
+    const initDev = params.get("device");
+    const initTab = params.get("tab");
+    if (initTab && TABS.some((t) => t.id === initTab)) state.tab = initTab;
+    state.activeId = (initDev && state.devices.some((d) => d.id === initDev))
+      ? initDev
+      : (state.devices[0]?.id || null);
     renderAll();
     if (state.activeId) await loadDeviceState(state.activeId);
     // 后台预拉其余在线设备电量，左侧栏立即可见

@@ -156,7 +156,12 @@ fn build_main_window(
         .color(Color(10, 12, 18, 195))
         .build();
 
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+    let entry_url = match std::env::var("REDMAGIC_VIEW") {
+        Ok(q) if !q.trim().is_empty() => format!("index.html?{}", q.trim().trim_start_matches('?')),
+        _ => "index.html".to_string(),
+    };
+
+    WebviewWindowBuilder::new(app, "main", WebviewUrl::App(entry_url.into()))
         .title("REDMAGIC Control")
         .inner_size(1280.0, 820.0)
         .min_inner_size(1080.0, 680.0)
