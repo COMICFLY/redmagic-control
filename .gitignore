@@ -1,0 +1,21 @@
+# Rust / Cargo build outputs
+/target/
+**/*.rs.bk
+*.pdb
+
+# Tauri auto-generated capability schemas
+/gen/
+
+# OS & editor artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local debug logs & temp backups
+*.log
+*.prev.exe
+*.old.exe

@@ -1,0 +1,98 @@
+/* 三层设计 Token（Primitive → Semantic → Glass Component）
+ * 遵循 4px 栅格、暗黑曜石毛玻璃材质层级、单一红魔品牌强调色与等宽数字排版。 */
+
+:root {
+  /* Layer 1: Primitive */
+  --n-950: #090b10;
+  --n-900: #0f1219;
+  --n-850: #161a24;
+  --n-800: #1f2431;
+  --n-750: #293040;
+  --n-400: #9098a8;
+  --n-200: #c0c7d4;
+  --n-50: #f2f4f8;
+
+  --crimson-500: #e53945;
+  --crimson-600: #cc2b37;
+  --crimson-soft: rgba(229, 57, 69, 0.16);
+
+  --green-500: #34d399;
+  --amber-500: #f59e0b;
+  --red-500: #f05252;
+
+  /* Layer 2: Semantic & Frosted Glass Materials */
+  --bg-rail: rgba(12, 14, 21, 0.56);
+  --bg-canvas: rgba(9, 11, 16, 0.48);
+  --bg-surface: rgba(24, 28, 38, 0.50);
+  --bg-raised: rgba(255, 255, 255, 0.085);
+  --bg-hover: rgba(255, 255, 255, 0.13);
+
+  --glass-shell: rgba(8, 10, 15, 0.72);
+  --glass-chrome: linear-gradient(180deg, rgba(22, 26, 36, 0.64) 0%, rgba(12, 15, 22, 0.54) 100%);
+  --glass-rail: linear-gradient(180deg, rgba(16, 19, 27, 0.56) 0%, rgba(10, 12, 18, 0.48) 100%);
+  --glass-card: linear-gradient(155deg, rgba(31, 36, 49, 0.52) 0%, rgba(16, 19, 27, 0.42) 100%);
+  --glass-nested: linear-gradient(180deg, rgba(16, 19, 27, 0.54) 0%, rgba(10, 12, 18, 0.44) 100%);
+  --glass-pill: linear-gradient(180deg, rgba(255, 255, 255, 0.085) 0%, rgba(255, 255, 255, 0.035) 100%);
+  --glass-control: rgba(255, 255, 255, 0.055);
+  --glass-control-hover: rgba(255, 255, 255, 0.11);
+  --glass-control-active: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.08) 100%);
+  --glass-accent: linear-gradient(155deg, rgba(229, 57, 69, 0.22) 0%, rgba(229, 57, 69, 0.09) 100%);
+  --glass-toast: linear-gradient(155deg, rgba(30, 35, 48, 0.78) 0%, rgba(16, 19, 28, 0.72) 100%);
+
+  --blur-xl: blur(28px) saturate(175%);
+  --blur-lg: blur(22px) saturate(165%);
+  --blur-md: blur(14px) saturate(155%);
+  --blur-sm: blur(10px) saturate(145%);
+
+  --border-hairline: rgba(255, 255, 255, 0.085);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --border-glass: rgba(255, 255, 255, 0.115);
+
+  --glass-specular: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  --glass-specular-soft: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --glass-shadow: 0 16px 40px rgba(0, 0, 0, 0.34), 0 2px 8px rgba(0, 0, 0, 0.22);
+  --glass-shadow-sm: 0 6px 18px rgba(0, 0, 0, 0.24);
+
+  --text-primary: var(--n-50);
+  --text-secondary: var(--n-200);
+  --text-muted: var(--n-400);
+
+  --accent: var(--crimson-500);
+  --accent-strong: var(--crimson-600);
+  --accent-tint: var(--crimson-soft);
+
+  --status-ok: var(--green-500);
+  --status-warn: var(--amber-500);
+  --status-err: var(--red-500);
+
+  /* Layer 3: Component & Rhythm */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  --radius-xs: 6px;
+  --radius-sm: 9px;
+  --radius-md: 13px;
+  --radius-lg: 17px;
+
+  --font-sans: "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 140ms;
+  --dur-base: 220ms;
+
+  --titlebar-h: 50px;
+  --rail-w: 244px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>REDMAGIC Control</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="src/renderer/tokens.css" />
+    <link rel="stylesheet" href="src/renderer/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="brand" data-tauri-drag-region>
+          <span class="brand-mark" aria-hidden="true" data-tauri-drag-region>R</span>
+          <span class="brand-title" data-tauri-drag-region>REDMAGIC</span>
+          <span class="brand-sub" data-tauri-drag-region>Control</span>
+        </div>
+        <nav class="nav-tabs" id="nav-tabs" role="tablist" aria-label="功能分区" data-tauri-drag-region></nav>
+        <div class="titlebar-right">
+          <div class="conn-pill" id="titlebar-bat" hidden></div>
+          <div class="conn-pill" id="conn-pill" aria-live="polite">
+            <span class="status-dot" id="conn-dot"></span>
+            <span id="conn-text">正在扫描设备</span>
+          </div>
+          <div class="win-controls" aria-label="窗口控制">
+            <button type="button" class="win-btn" id="win-min" aria-label="最小化"></button>
+            <button type="button" class="win-btn" id="win-max" aria-label="最大化或还原"></button>
+            <button type="button" class="win-btn is-close" id="win-close" aria-label="关闭窗口"></button>
+          </div>
+        </div>
+      </header>
+
+      <div class="app-body">
+        <aside class="device-rail" aria-label="设备列表">
+          <div class="rail-head">
+            <span class="rail-label">已连接外设</span>
+            <button type="button" class="icon-btn" id="rescan-btn" title="重新扫描 HID 设备" aria-label="重新扫描设备"></button>
+          </div>
+          <div class="device-list" id="device-list" role="listbox" aria-label="选择设备"></div>
+          <div class="rail-footer">
+            <div class="sync-meta">
+              <span id="sync-status">等待读取</span>
+              <span class="mono" id="app-version">v0.3.0</span>
+            </div>
+            <button type="button" class="btn btn-secondary" id="reload-state-btn">从设备重新读取</button>
+          </div>
+        </aside>
+
+        <main class="canvas">
+          <div class="canvas-inner" id="workspace"></div>
+        </main>
+      </div>
+    </div>
+
+    <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+    <script src="src/renderer/tauri-bridge.js"></script>
+    <script type="module" src="src/renderer/app.js"></script>
+  </body>
+</html>
