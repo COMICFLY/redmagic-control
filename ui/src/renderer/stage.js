@@ -76,7 +76,7 @@ export function renderConnectionBadge(mode, linkState = "online", { mock = false
   return `<span class="conn-badge is-wired" title="USB 有线直连（56B 全速通道）">${icon("usb", 11)}<span>${compact ? "有线" : "USB 有线"}</span></span>`;
 }
 
-export function renderKeyboardStage(device, hwState, { interactiveKeys = false, selectedSlot = null, showLightPreview = false, large = false, screenDataUrl = null } = {}) {
+export function renderKeyboardStage(device, hwState, { interactiveKeys = false, paintKeys = false, selectedSlot = null, showLightPreview = false, large = false, screenDataUrl = null, customHint = null } = {}) {
   const kmBySlot = new Map((hwState?.keymap || []).map((k) => [k.slot, k]));
 
   // 原图在裁剪框内的相对缩放与偏移（纯百分比，任意窗口尺寸零漂移）
@@ -113,11 +113,11 @@ export function renderKeyboardStage(device, hwState, { interactiveKeys = false, 
       const height = ((k.h / KB_CROP.h) * 100).toFixed(3);
       const nx = Math.max(0, Math.min(1, lx / KB_CROP.w)).toFixed(3);
       const ny = Math.max(0, Math.min(1, ly / KB_CROP.h)).toFixed(3);
-      return `<span class="kb-led" data-nx="${nx}" data-ny="${ny}" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%"></span>`;
+      return `<span class="kb-led" data-slot="${k.hwSlot}" data-nx="${nx}" data-ny="${ny}" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%"></span>`;
     }).join("");
   }
 
-  // 交互式键位映射热点层（点击改键）
+  // 交互式键位映射热点层（点击改键）或逐键涂色热区（拖拽涂色）
   let hitLayerHtml = "";
   if (interactiveKeys) {
     hitLayerHtml = KB_STAGE.keys.map((k) => {
@@ -132,6 +132,17 @@ export function renderKeyboardStage(device, hwState, { interactiveKeys = false, 
       const height = ((k.h / KB_CROP.h) * 100).toFixed(3);
       const tip = row ? `${k.name}（槽位 #${k.hwSlot}）· 当前：${row.current.label}` : k.name;
       return `<button type="button" class="kb-key-hit${isSel ? " is-selected" : ""}${isMod ? " is-modified" : ""}" data-select-slot="${k.hwSlot}" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${isSel}"><span class="kb-hit-cap">${esc(isMod && row ? row.current.label : "")}</span></button>`;
+    }).join("");
+  } else if (paintKeys) {
+    hitLayerHtml = KB_STAGE.keys.map((k) => {
+      const lx = k.x - KB_CROP.x;
+      const ly = k.y - KB_TOP_OFFSET - KB_CROP.y;
+      const left = ((lx / KB_CROP.w) * 100).toFixed(3);
+      const top = ((ly / KB_CROP.h) * 100).toFixed(3);
+      const width = ((k.w / KB_CROP.w) * 100).toFixed(3);
+      const height = ((k.h / KB_CROP.h) * 100).toFixed(3);
+      const tip = `${k.name}（槽位 #${k.hwSlot}）· 左键涂色 / 右键擦除`;
+      return `<button type="button" class="kb-paint-hit" data-paint-slot="${k.hwSlot}" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%" title="${esc(tip)}" aria-label="${esc(tip)}"></button>`;
     }).join("");
   }
 
@@ -156,7 +167,7 @@ export function renderKeyboardStage(device, hwState, { interactiveKeys = false, 
         <span class="keycap">PID 0x${(device.pid || 0).toString(16).padStart(4, "0")}</span>
         ${interactiveKeys && knobRow ? `<button type="button" class="keycap${knobSelected ? " is-selected" : ""}" data-select-slot="125" aria-pressed="${knobSelected}">旋钮 #125 · ${esc(knobRow.current.label)}</button>` : ""}
       </div>
-      <span class="stage-hint">${interactiveKeys ? "直接点击放大键位即可编辑 · 红点表示已改键" : (hwState?.mock ? "仿真实时预览" : hwState?.linkState === "sleeping" ? "2.4G 设备休眠中" : hwState?.linkState === "bt-readonly" ? "蓝牙 BLE 预览" : "实时同步自设备")}</span>
+      <span class="stage-hint">${esc(customHint || (interactiveKeys ? "直接点击放大键位即可编辑 · 红点表示已改键" : (hwState?.mock ? "仿真实时预览" : hwState?.linkState === "sleeping" ? "2.4G 设备休眠中" : hwState?.linkState === "bt-readonly" ? "蓝牙 BLE 预览" : "实时同步自设备")))}</span>
     </div>
   `;
 }

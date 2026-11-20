@@ -3,6 +3,7 @@
 
 import { icon } from "./icons.js";
 import { renderConnectionBadge, renderKeyboardStage, renderMouseStage } from "./stage.js";
+import { STUDIO_SCRIPTS, buildExternalExamplePython } from "./studio.js";
 
 const SWATCHES = [
   "#e53945", "#ff6b2c", "#f5c518", "#22c55e", "#14b8a6",
@@ -823,6 +824,317 @@ export function renderHardware(device, hwState) {
           <span class="field-label">OP 0x05 配置块 (${device.kind === "keyboard" ? "50B" : "84B"})</span>
           <pre class="hex-dump">${esc(hwState.config?.rawHex || "--")}</pre>
         </div>
+      </section>
+    </div>`;
+}
+
+/* ---- 视图 6：灯效编程工作室（板载逐键 OP 0x0b / JS Shader 实时流 OP 0x12+0x28 / 多图层联动 / 本地 UDP+WS 接口） ---- */
+export function renderStudio(device, hwState, ui) {
+  const st = ui.studio;
+  const sub = st.subMode || "script";
+  const readOnly = !hwState.mock && hwState.supportsConfig === false;
+  const is24g = (hwState.connectionMode || device.connectionMode) === "2.4g";
+  const targetFpsLabel = is24g ? "2.4G · 8 FPS" : "USB 有线 · 30 FPS";
+  const isAudioOn = st.telemetry?.audio?.active || (sub === "layers" && st.layers.audio.enabled);
+
+  // 左下状态胶囊
+  let livePillHtml = `<span class="conn-badge" id="studio-live-pill">仅预览 · 未推流</span>`;
+  if (st.serverStatus?.running) {
+    livePillHtml = `<span class="conn-badge is-24g" id="studio-live-pill">外部接口接管 · ${st.serverStatus.fps || 0} FPS</span>`;
+  } else if (st.streaming) {
+    livePillHtml = `<span class="conn-badge is-24g" id="studio-live-pill">RAM 实时推流 · ${st.streamFps || (is24g ? 8 : 30)} FPS</span>`;
+  } else if (sub === "paint") {
+    livePillHtml = `<span class="conn-badge is-wired" id="studio-live-pill">板载逐键 · 组 ${st.paintGroup + 1}</span>`;
+  }
+
+  const stageHint = sub === "paint"
+    ? "左键拖拽涂色 · 右键擦除 · OP 0x0b"
+    : sub === "api"
+      ? "实时预览 UDP / WS / HTTP 推送帧"
+      : `OP 0x12+0x28 零损耗 RAM · ${targetFpsLabel}`;
+
+  // 音频频谱可视化微条（仅启用音频感知时渲染）
+  const bands = st.telemetry?.audio?.bands || new Array(16).fill(0);
+  const audioMeterHtml = isAudioOn ? `
+    <div class="studio-audio-meter" id="studio-audio-meter" aria-label="WASAPI 16 段实时频谱">
+      <div class="studio-audio-head">
+        <span class="field-label">${icon("music", 12)} WASAPI 系统回环 16 段频谱</span>
+        <span class="field-hint mono" id="studio-audio-status">${st.telemetry?.audio?.error ? esc(st.telemetry.audio.error) : "实时采集"}</span>
+      </div>
+      <div class="studio-eq-bars">
+        ${bands.map((v, idx) => `<span class="studio-eq-bar" data-band="${idx}" style="height:${Math.max(8, Math.round(v * 100))}%"></span>`).join("")}
+      </div>
+    </div>` : "";
+
+  // 左下方实时推流控制台
+  let leftFootHtml = "";
+  if (sub === "paint") {
+    leftFootHtml = `
+      <div class="studio-stream-bar">
+        <div class="studio-bar-copy">
+          <strong>板载 Flash 逐键存储（OP 0x0a / OP 0x0b）</strong>
+          <span>写入后无需后台运行，断电或切无线仍生效。</span>
+        </div>
+        <div class="card-actions">
+          <button type="button" class="btn btn-secondary btn-sm" id="studio-paint-read-btn" ${readOnly ? "disabled" : ""}>${icon("refresh", 13)}读取板载</button>
+          <button type="button" class="btn btn-primary btn-sm" id="studio-paint-write-btn" ${readOnly ? "disabled" : ""}>${icon("upload", 13)}写入并启用</button>
+        </div>
+      </div>`;
+  } else if (sub === "api") {
+    const running = Boolean(st.serverStatus?.running);
+    leftFootHtml = `
+      <div class="studio-stream-bar">
+        <div class="studio-bar-copy">
+          <strong>${running ? `本地接口运行中 · 已收 ${st.serverStatus.packets || 0} 帧` : "本地回环控灯桥未启动"}</strong>
+          <span class="mono">UDP 127.0.0.1:${st.udpPort} · HTTP/WS 127.0.0.1:${st.httpPort}</span>
+        </div>
+        <button type="button" class="btn ${running ? "btn-danger" : "btn-primary"} btn-sm" id="studio-server-toggle-btn" ${readOnly ? "disabled" : ""}>
+          ${running ? `${icon("stop", 13)}停止服务` : `${icon("play", 13)}启动本地服务`}
+        </button>
+      </div>`;
+  } else {
+    leftFootHtml = `
+      <div class="studio-stream-bar">
+        <div class="studio-stream-left">
+          <button type="button" class="btn ${st.streaming ? "btn-danger" : "btn-primary"} btn-sm" id="studio-stream-btn" ${readOnly ? "disabled" : ""}>
+            ${st.streaming ? `${icon("stop", 13)}停止推流并恢复原灯效` : `${icon("play", 13)}开始实时推流到真机`}
+          </button>
+          <label class="studio-check">
+            <input type="checkbox" id="studio-logo-sync"${st.includeLogo ? " checked" : ""} />
+            <span>同步 Logo 20 灯</span>
+          </label>
+        </div>
+        <div class="studio-bri-ctrl">
+          <span class="field-label nowrap">亮度</span>
+          <input type="range" id="studio-bri-range" min="15" max="100" step="5" value="${Math.round((st.brightness ?? 1) * 100)}" aria-label="推流主亮度" />
+          <span class="mono field-label" id="studio-bri-val">${Math.round((st.brightness ?? 1) * 100)}%</span>
+        </div>
+      </div>`;
+  }
+
+  // 右侧 4 个子模式面板
+  let rightBodyHtml = "";
+  if (sub === "paint") {
+    const swHtml = SWATCHES.map((hex) =>
+      `<button type="button" class="swatch" style="--sw:${hex}" data-paint-swatch="${hex}" aria-pressed="${st.paintColor.toLowerCase() === hex}" aria-label="画笔颜色 ${hex}"></button>`
+    ).join("");
+    const grpBtns = [0, 1, 2, 3].map((g) =>
+      `<button type="button" class="seg-btn mono" data-paint-group="${g}" aria-pressed="${st.paintGroup === g}">组 ${g + 1}</button>`
+    ).join("");
+    rightBodyHtml = `
+      <div class="stack">
+        <div class="stack-sm">
+          <span class="field-label">板载存储分组（OP 0x0b · 4 组独立槽位）</span>
+          <div class="seg is-full">${grpBtns}</div>
+        </div>
+
+        <div class="stack-sm">
+          <span class="field-label">画笔工具（支持在左侧键盘直接拖拽涂色）</span>
+          <div class="seg is-full">
+            <button type="button" class="seg-btn" data-paint-tool="brush" aria-pressed="${st.paintTool === "brush"}">${icon("brush", 13)} 画笔</button>
+            <button type="button" class="seg-btn" data-paint-tool="eraser" aria-pressed="${st.paintTool === "eraser"}">${icon("eraser", 13)} 橡皮擦</button>
+            <button type="button" class="seg-btn" data-paint-tool="eyedropper" aria-pressed="${st.paintTool === "eyedropper"}">${icon("pipette", 13)} 吸管取色</button>
+          </div>
+        </div>
+
+        <div class="stack-sm">
+          <div class="row">
+            <span class="field-label">画笔颜色</span>
+            <span class="mono field-label">${esc(st.paintColor.toUpperCase())}</span>
+          </div>
+          <div class="swatch-grid">
+            ${swHtml}
+            <input type="color" class="color-dot-input" id="studio-paint-picker" value="${esc(st.paintColor)}" aria-label="自定义画笔颜色" />
+          </div>
+        </div>
+
+        <div class="stack-sm">
+          <span class="field-label">一键分区模板</span>
+          <div class="studio-tpl-grid">
+            <button type="button" class="mode-btn" data-paint-tpl="redmagic">红魔战甲</button>
+            <button type="button" class="mode-btn" data-paint-tpl="fps">FPS WASD</button>
+            <button type="button" class="mode-btn" data-paint-tpl="moba">MOBA QWER</button>
+            <button type="button" class="mode-btn" data-paint-tpl="cyber">赛博渐变</button>
+            <button type="button" class="mode-btn" data-paint-tpl="white">纯白极简</button>
+            <button type="button" class="mode-btn" data-paint-tpl="clear">全黑清空</button>
+          </div>
+        </div>
+
+        <div class="mode-hint-box">
+          <strong>持久化说明</strong>
+          <span>点击左侧「写入并启用」后将 378B 逐键色彩写入 Flash 并切换至「自定义」灯效，关闭软件仍永久保持。</span>
+        </div>
+      </div>`;
+  } else if (sub === "script") {
+    const activePreset = STUDIO_SCRIPTS.find((s) => s.id === st.scriptId) || STUDIO_SCRIPTS[0];
+    const presetBtns = STUDIO_SCRIPTS.map((s) =>
+      `<button type="button" class="mode-btn" data-studio-script="${esc(s.id)}" aria-pressed="${st.scriptId === s.id}">${esc(s.name)}</button>`
+    ).join("");
+    const labels = activePreset.labels || ["参数 P1", "参数 P2", "参数 P3"];
+    rightBodyHtml = `
+      <div class="stack">
+        <div class="stack-sm">
+          <div class="row">
+            <span class="field-label">脚本预设</span>
+            <div class="card-actions">
+              <button type="button" class="btn btn-secondary btn-sm" id="studio-import-btn">${icon("folder", 12)}导入</button>
+              <button type="button" class="btn btn-secondary btn-sm" id="studio-export-btn">${icon("download", 12)}导出</button>
+            </div>
+          </div>
+          <div class="studio-preset-grid">${presetBtns}</div>
+        </div>
+
+        <div class="stack-sm">
+          <div class="row">
+            <span class="field-label mono">render(x, y, t, ctx) → [r, g, b]</span>
+            <span class="field-hint">实时热更新</span>
+          </div>
+          <textarea class="studio-code mono" id="studio-code-editor" spellcheck="false">${esc(st.scriptCode)}</textarea>
+          <div class="studio-code-err" id="studio-code-err"${st.scriptError ? "" : " hidden"}>${esc(st.scriptError)}</div>
+        </div>
+
+        <div class="studio-param-grid">
+          <label class="studio-param">
+            <div class="row"><span class="field-label">${esc(labels[0])}</span><span class="mono field-hint" id="studio-p1-val">${Math.round(st.p1 * 100)}%</span></div>
+            <input type="range" data-studio-param="p1" min="0" max="100" value="${Math.round(st.p1 * 100)}" />
+          </label>
+          <label class="studio-param">
+            <div class="row"><span class="field-label">${esc(labels[1])}</span><span class="mono field-hint" id="studio-p2-val">${Math.round(st.p2 * 100)}%</span></div>
+            <input type="range" data-studio-param="p2" min="0" max="100" value="${Math.round(st.p2 * 100)}" />
+          </label>
+          <label class="studio-param">
+            <div class="row"><span class="field-label">${esc(labels[2])}</span><span class="mono field-hint" id="studio-p3-val">${Math.round(st.p3 * 100)}%</span></div>
+            <input type="range" data-studio-param="p3" min="0" max="100" value="${Math.round(st.p3 * 100)}" />
+          </label>
+        </div>
+
+        <div class="studio-sensor-row">
+          <span class="field-label">系统联动源</span>
+          <div class="studio-sensor-checks">
+            <label class="studio-check"><input type="checkbox" data-studio-sensor="audio"${st.telemetry?.audio?.active ? " checked" : ""} /><span>WASAPI 音频</span></label>
+            <label class="studio-check"><input type="checkbox" data-studio-sensor="ambilight"${st.telemetry?.ambilight?.active ? " checked" : ""} /><span>屏幕拾色</span></label>
+            <label class="studio-check"><input type="checkbox" data-studio-sensor="keys"${st.telemetry?.keys?.active ? " checked" : ""} /><span>全局按键</span></label>
+          </div>
+        </div>
+      </div>`;
+  } else if (sub === "layers") {
+    const L = st.layers;
+    rightBodyHtml = `
+      <div class="studio-layers-list">
+        <div class="studio-layer-card${L.gradient.enabled ? " is-on" : ""}">
+          <div class="row">
+            <strong>1. 动态渐变基底</strong>
+            <div class="row-start">
+              <input type="color" class="color-dot-input" value="${esc(L.gradient.colorA)}" data-layer-field="gradient.colorA" title="渐变色 A" />
+              <input type="color" class="color-dot-input" value="${esc(L.gradient.colorB)}" data-layer-field="gradient.colorB" title="渐变色 B" />
+              ${toggleSwitch("layer-grad-en", L.gradient.enabled, 'data-layer-toggle="gradient"')}
+            </div>
+          </div>
+          <div class="studio-layer-sliders">
+            <label><span>速度</span><input type="range" min="0" max="100" value="${Math.round(L.gradient.speed * 100)}" data-layer-range="gradient.speed" /></label>
+            <label><span>强度</span><input type="range" min="0" max="100" value="${Math.round(L.gradient.opacity * 100)}" data-layer-range="gradient.opacity" /></label>
+          </div>
+        </div>
+
+        <div class="studio-layer-card${L.audio.enabled ? " is-on" : ""}">
+          <div class="row">
+            <strong>2. WASAPI 音乐频谱</strong>
+            <div class="row-start">
+              <input type="color" class="color-dot-input" value="${esc(L.audio.color)}" data-layer-field="audio.color" title="频谱柱颜色" />
+              ${toggleSwitch("layer-aud-en", L.audio.enabled, 'data-layer-toggle="audio"')}
+            </div>
+          </div>
+          <div class="studio-layer-sliders">
+            <label><span>灵敏</span><input type="range" min="0" max="100" value="${Math.round(L.audio.sensitivity * 100)}" data-layer-range="audio.sensitivity" /></label>
+            <label><span>叠加</span><input type="range" min="0" max="100" value="${Math.round(L.audio.opacity * 100)}" data-layer-range="audio.opacity" /></label>
+          </div>
+        </div>
+
+        <div class="studio-layer-card${L.ambilight.enabled ? " is-on" : ""}">
+          <div class="row">
+            <strong>3. 屏幕流光溢彩 (16×6)</strong>
+            ${toggleSwitch("layer-ambi-en", L.ambilight.enabled, 'data-layer-toggle="ambilight"')}
+          </div>
+          <div class="studio-layer-sliders is-single">
+            <label><span>融合度</span><input type="range" min="0" max="100" value="${Math.round(L.ambilight.opacity * 100)}" data-layer-range="ambilight.opacity" /></label>
+          </div>
+        </div>
+
+        <div class="studio-layer-card${L.typing.enabled ? " is-on" : ""}">
+          <div class="row">
+            <strong>4. 全局打字霓虹涟漪</strong>
+            <div class="row-start">
+              <input type="color" class="color-dot-input" value="${esc(L.typing.color)}" data-layer-field="typing.color" title="涟漪颜色" />
+              ${toggleSwitch("layer-typ-en", L.typing.enabled, 'data-layer-toggle="typing"')}
+            </div>
+          </div>
+          <div class="studio-layer-sliders">
+            <label><span>波速</span><input type="range" min="0" max="100" value="${Math.round(L.typing.speed * 100)}" data-layer-range="typing.speed" /></label>
+            <label><span>亮度</span><input type="range" min="0" max="100" value="${Math.round(L.typing.opacity * 100)}" data-layer-range="typing.opacity" /></label>
+          </div>
+        </div>
+      </div>`;
+  } else {
+    const srv = st.serverStatus || {};
+    const pySample = buildExternalExamplePython(st.udpPort, st.httpPort);
+    rightBodyHtml = `
+      <div class="stack">
+        <div class="row">
+          <div class="stack-sm" style="flex:1">
+            <label class="field-label" for="studio-udp-port">UDP 二进制/JSON 端口</label>
+            <input class="input mono" id="studio-udp-port" type="number" min="1024" max="65535" value="${st.udpPort}" ${srv.running ? "disabled" : ""} />
+          </div>
+          <div class="stack-sm" style="flex:1">
+            <label class="field-label" for="studio-http-port">HTTP / WebSocket 端口</label>
+            <input class="input mono" id="studio-http-port" type="number" min="1024" max="65535" value="${st.httpPort}" ${srv.running ? "disabled" : ""} />
+          </div>
+        </div>
+
+        <div class="studio-api-stats">
+          <div class="spec-item"><dt>服务状态</dt><dd class="mono" id="studio-srv-state">${srv.running ? "运行中 (127.0.0.1)" : "已停止"}</dd></div>
+          <div class="spec-item"><dt>已收帧 / 实时帧率</dt><dd class="mono" id="studio-srv-rate">${srv.packets || 0} 帧 · ${srv.fps || 0} FPS</dd></div>
+        </div>
+
+        <div class="stack-sm">
+          <div class="row">
+            <span class="field-label">协议与调用示例（Python / Node / C++）</span>
+            <button type="button" class="btn btn-secondary btn-sm" id="studio-copy-api-btn">${icon("copy", 12)}复制代码</button>
+          </div>
+          <pre class="hex-dump studio-api-sample">${esc(pySample)}</pre>
+        </div>
+
+        <p class="screen-foot-note">严格绑定 <span class="mono">127.0.0.1</span> 仅限本机进程访问；支持 <span class="mono">RMGB</span> 二进制帧（&lt;1ms 延迟）、<span class="mono">POST /api/rgb</span> 及 <span class="mono">ws://127.0.0.1:${st.httpPort}/ws</span>。</p>
+      </div>`;
+  }
+
+  return `
+    <div class="workbench is-studio">
+      <section class="card">
+        <div class="card-head">
+          <div class="card-head-text">
+            <h2 class="card-title">实时灯效舞台</h2>
+            <p class="card-desc">${sub === "paint" ? "点击或拖过任意键帽实时填色，支持 4 组板载方案持久化" : "60 FPS 实时预览 · 开启推流直达 100 键与 20 颗顶部 Logo 灯"}</p>
+          </div>
+          ${livePillHtml}
+        </div>
+        ${renderKeyboardStage(device, hwState, {
+          showLightPreview: true,
+          paintKeys: sub === "paint",
+          screenDataUrl: ui.screenDataUrl,
+          customHint: stageHint,
+        })}
+        ${audioMeterHtml}
+        ${leftFootHtml}
+      </section>
+
+      <section class="card${readOnly && sub !== "script" ? " is-readonly" : ""}">
+        <div class="seg is-full">
+          <button type="button" class="seg-btn" data-studio-sub="paint" aria-pressed="${sub === "paint"}">${icon("brush", 13)} 逐键涂色</button>
+          <button type="button" class="seg-btn" data-studio-sub="script" aria-pressed="${sub === "script"}">${icon("code", 13)} 脚本编程</button>
+          <button type="button" class="seg-btn" data-studio-sub="layers" aria-pressed="${sub === "layers"}">${icon("layers", 13)} 多图层</button>
+          <button type="button" class="seg-btn" data-studio-sub="api" aria-pressed="${sub === "api"}">${icon("radio", 13)} 外部接口</button>
+        </div>
+        ${rightBodyHtml}
       </section>
     </div>`;
 }

@@ -12,8 +12,9 @@ use crate::devices::hid_win::{enumerate_hid_devices, WinHidDevice};
 use crate::protocol::frame::{build_frame, is_wireless_nack, matches_header, parse_frame, HidFrame};
 use crate::protocol::usage::{build_default_kb_rom, build_default_ms_rom};
 use crate::protocol::{
-    CHUNK_SIZE, CHUNK_SIZE_24G, HEARTBEAT, POLL_STATUS, PREPARE_SCREEN_IMG, READ_CONFIG,
-    READ_INFO, READ_KEYMAP_ROM, READ_KEYMAP_USER, TX_BEGIN, TX_COMMIT, WRITE_CONFIG, WRITE_KEYMAP,
+    CHUNK_SIZE, CHUNK_SIZE_24G, HEARTBEAT, LOGO_RGB_LEN, POLL_STATUS, PREPARE_SCREEN_IMG,
+    READ_CONFIG, READ_CUSTOM_RGB, READ_INFO, READ_KEYMAP_ROM, READ_KEYMAP_USER, STREAM_KEY_RGB,
+    STREAM_LOGO_RGB, TX_BEGIN, TX_COMMIT, WRITE_CONFIG, WRITE_CUSTOM_RGB, WRITE_KEYMAP,
     WRITE_SCREEN_GIF_1, WRITE_SCREEN_GIF_2, WRITE_SCREEN_IMG,
 };
 
@@ -75,6 +76,10 @@ pub struct MockState {
     pub config: Vec<u8>,
     pub rom_keymap: Vec<u8>,
     pub user_keymap: Vec<u8>,
+    pub custom_rgb_flash: Vec<u8>,
+    pub direct_key_rgb: Vec<u8>,
+    pub direct_logo_rgb: Vec<u8>,
+    pub stream_frames: u64,
     pub screen_flash: Vec<u8>,
     pub max_observed_chunk: usize,
 }
@@ -95,6 +100,27 @@ impl MockState {
             DeviceKind::Mouse => build_default_ms_rom(),
         };
         let user_keymap = rom_keymap.clone();
+        // 默认仿真逐键自定义灯效（4 组 × 512B）：第 0 组预置红魔绯红底色 + WASD 亮白高亮
+        let mut custom_rgb_flash = if kind == DeviceKind::Keyboard {
+            vec![0u8; 4 * 0x200]
+        } else {
+            Vec::new()
+        };
+        if kind == DeviceKind::Keyboard {
+            for slot in 0..126 {
+                let o = slot * 3;
+                custom_rgb_flash[o] = 0x55;
+                custom_rgb_flash[o + 1] = 0x10;
+                custom_rgb_flash[o + 2] = 0x18;
+            }
+            // W(44), A(64), S(65), D(66), Esc(0)
+            for &s in &[0usize, 44, 64, 65, 66] {
+                let o = s * 3;
+                custom_rgb_flash[o] = 0xe5;
+                custom_rgb_flash[o + 1] = 0x39;
+                custom_rgb_flash[o + 2] = 0x45;
+            }
+        }
         Self {
             kind,
             wireless_online,
@@ -104,6 +130,10 @@ impl MockState {
             config,
             rom_keymap,
             user_keymap,
+            custom_rgb_flash,
+            direct_key_rgb: if kind == DeviceKind::Keyboard { vec![0u8; 126 * 3] } else { Vec::new() },
+            direct_logo_rgb: if kind == DeviceKind::Keyboard { vec![0u8; LOGO_RGB_LEN] } else { Vec::new() },
+            stream_frames: 0,
             screen_flash: if kind == DeviceKind::Keyboard {
                 vec![0u8; 0x20000]
             } else {
@@ -391,6 +421,41 @@ impl Transport {
                             out[..n].copy_from_slice(&p[..n]);
                         }
                     }
+                    READ_CUSTOM_RGB => {
+                        if off_u < m.custom_rgb_flash.len() {
+                            let n = len.min(m.custom_rgb_flash.len() - off_u);
+                            out[..n].copy_from_slice(&m.custom_rgb_flash[off_u..off_u + n]);
+                        }
+                    }
+                    WRITE_CUSTOM_RGB => {
+                        if let Some(p) = payload {
+                            if off_u < m.custom_rgb_flash.len() {
+                                let n = len.min(p.len()).min(m.custom_rgb_flash.len() - off_u);
+                                m.custom_rgb_flash[off_u..off_u + n].copy_from_slice(&p[..n]);
+                            }
+                            let n = len.min(p.len()).min(out.len());
+                            out[..n].copy_from_slice(&p[..n]);
+                        }
+                    }
+                    STREAM_KEY_RGB => {
+                        if let Some(p) = payload {
+                            if off_u < m.direct_key_rgb.len() {
+                                let n = len.min(p.len()).min(m.direct_key_rgb.len() - off_u);
+                                m.direct_key_rgb[off_u..off_u + n].copy_from_slice(&p[..n]);
+                            }
+                            if off_u == 0 {
+                                m.stream_frames += 1;
+                            }
+                        }
+                    }
+                    STREAM_LOGO_RGB => {
+                        if let Some(p) = payload {
+                            if off_u < m.direct_logo_rgb.len() {
+                                let n = len.min(p.len()).min(m.direct_logo_rgb.len() - off_u);
+                                m.direct_logo_rgb[off_u..off_u + n].copy_from_slice(&p[..n]);
+                            }
+                        }
+                    }
                     PREPARE_SCREEN_IMG => {
                         m.screen_flash.fill(0);
                     }
@@ -570,6 +635,32 @@ impl Transport {
                 "事务提交失败 (status=0x{:02x})",
                 commit.status
             )));
+        }
+        Ok(())
+    }
+
+    /// 零 Flash 损耗的高速实时 RAM 帧推送（OP 0x12 主键逐键 378B / OP 0x28 顶部 Logo 60B）
+    /// 对齐官方 Goper.exe 0x4e1380 / 0x4e1630：不发送 TX_BEGIN/TX_COMMIT，按单帧 MTU 分包直写 RAM
+    pub fn stream_blob(&mut self, op: u8, data: &[u8]) -> Result<(), TransportError> {
+        if !self.supports_config {
+            return Err(TransportError::BtConfigUnsupported(
+                "蓝牙 BLE 模式不支持实时 RGB 流式推送，请切换至 USB 有线或 2.4G 无线".to_string(),
+            ));
+        }
+        let step = self.chunk_size;
+        let timeout_ms = if self.mode == ConnectionMode::Wired { 140 } else { 260 };
+        let mut off = 0usize;
+        while off < data.len() {
+            let len = step.min(data.len() - off);
+            let slice = &data[off..off + len];
+            let r = self.xfer(op, len, off as u32, Some(slice), Some(timeout_ms))?;
+            if r.status == 0xff || r.status == 0xfe {
+                return Err(TransportError::Io(format!(
+                    "实时灯效帧被设备拒绝 (op=0x{op:02x}, status=0x{:02x})",
+                    r.status
+                )));
+            }
+            off += step;
         }
         Ok(())
     }

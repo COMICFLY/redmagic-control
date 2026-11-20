@@ -5,6 +5,19 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-20
+
+### Added
+- **Programmable RGB Studio (`灯效编程`)** for `GK001S` with 4 unified sub-modes fitting cleanly inside `1280×820` without page scrolling:
+  1. **Onboard Per-Key Static RGB Painter (`逐键涂色`, `OP 0x0a` / `OP 0x0b`)**: Click or drag-paint across all 100 physical keys (brush / right-click eraser / eyedropper), 4 independent onboard Flash slots (`group 0..3`, offset `group * 0x200`, `378 B`), and 6 quick zone templates (RedMagic, FPS WASD, MOBA QWER, Cyber Gradient, Pure White, Clear). Persists offline across Bluetooth, 2.4G, and power cycles.
+  2. **JS Shader Programmable Lighting Engine + Zero-Wear Volatile RAM Streaming (`脚本编程`, `OP 0x12` + `OP 0x28`)**: Live hot-reloading `render(x, y, t, ctx) -> [r, g, b]` editor with 6 built-in presets (Cyber Aurora, RedMagic Radar, Typing Ripple, Music Spectrum, Screen Ambilight, Digital Matrix), real-time `p1/p2/p3` sliders, `.json`/`.js` preset import/export, 60 FPS UI preview, and direct volatile RAM streaming (`30 FPS` USB wired / `8 FPS` 2.4G, 100 keys `378 B` + top 20-LED Logo strip `60 B`, zero Flash wear, automatic onboard lighting restore on stop or exit).
+  3. **Multi-Layer Compositor + Pure-Rust Windows System Linkage Engines (`多图层`)**:
+     - `src/studio/audio.rs`: Pure-Rust Windows WASAPI loopback capture with built-in 512-point Radix-2 FFT 16-band spectrum + adaptive AGC and live equalizer bar.
+     - `src/studio/ambilight.rs`: Pure-Rust Win32 GDI `16×6` primary screen color sampler + 20-LED top edge mapper with vibrance boost and EMA smoothing.
+     - `src/studio/keyhook.rs`: Pure-Rust 60 Hz Win32 `GetAsyncKeyState` global key activity & coordinate pulse mapper for typing ripples.
+  4. **Local Loopback External RGB Bridge API (`外部接口`, `src/studio/server.rs`)**: Strictly bound to `127.0.0.1`, exposing high-speed UDP (`27650`, `<1 ms` `RMGB` binary frame + JSON) and HTTP / RFC 6455 WebSocket (`27651`: `GET /api/status`, `POST /api/rgb`, `WS /ws`) with live packet/FPS telemetry, stage preview, and copyable Python starter snippet.
+- **Background monitor guard during streaming**: Automatically pauses background HID telemetry polling while real-time RAM streaming is active, and restores original keyboard `light.mode` / `logo.mode` cleanly on tab switch, stop, or app exit.
+
 ## [0.3.2] - 2026-11-20
 
 ### Fixed

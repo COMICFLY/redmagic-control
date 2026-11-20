@@ -3,6 +3,7 @@
 mod commands;
 mod devices;
 mod protocol;
+mod studio;
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -10,6 +11,7 @@ use std::path::PathBuf;
 
 use commands::AppState;
 use devices::manager::DeviceManager;
+use studio::StudioEngine;
 use tauri::window::{Color, Effect, EffectsBuilder};
 use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
 
@@ -225,11 +227,13 @@ fn main() {
     };
 
     let manager = DeviceManager::new(force_mock);
+    let studio = StudioEngine::new();
     let monitor_mgr = manager.clone();
     let cleanup_mgr = manager.clone();
+    let cleanup_studio = studio.clone();
 
     tauri::Builder::default()
-        .manage(AppState { manager })
+        .manage(AppState { manager, studio })
         .setup(move |app| {
             // 优先使用固定 WebView2 数据目录；Mock 预览或遭遇 0x800700AA（目录被占用）时自动使用独立临时目录避免闪退
             let win = if force_mock {
@@ -291,11 +295,23 @@ fn main() {
             commands::device_screen_lib_delete,
             commands::screen_pick_file,
             commands::screen_paste_clipboard,
+            commands::device_custom_rgb_read,
+            commands::device_custom_rgb_write,
+            commands::studio_direct_start,
+            commands::studio_direct_stop,
+            commands::studio_stream_frame,
+            commands::studio_sensors_set,
+            commands::studio_telemetry,
+            commands::studio_server_start,
+            commands::studio_server_stop,
+            commands::studio_export_preset,
+            commands::studio_import_preset,
         ])
         .build(tauri::generate_context!())
         .expect("构建 Tauri 应用失败")
         .run(move |_app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+                cleanup_studio.shutdown(&cleanup_mgr);
                 cleanup_mgr.close_all_sessions();
             }
         });

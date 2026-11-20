@@ -15,13 +15,22 @@ use crate::devices::screen_lib::{
 use crate::devices::transport::{default_kb_config, Transport, TransportError};
 use crate::protocol::usage::{build_default_kb_rom, bytes_to_hex3, decode_assignment, hex3_to_bytes};
 use crate::protocol::{
-    CHUNK_SIZE, POLL_STATUS, PREPARE_SCREEN_IMG, READ_CONFIG, READ_INFO, READ_KEYMAP_ROM,
-    READ_KEYMAP_USER, WRITE_CONFIG, WRITE_KEYMAP, WRITE_SCREEN_IMG,
+    CHUNK_SIZE, CUSTOM_RGB_GROUP_STRIDE, KB_LOGO_MODE_DIRECT, KB_MODE_CUSTOM, KB_MODE_DIRECT,
+    LOGO_RGB_LEN, POLL_STATUS, PREPARE_SCREEN_IMG, READ_CONFIG, READ_CUSTOM_RGB, READ_INFO,
+    READ_KEYMAP_ROM, READ_KEYMAP_USER, STREAM_KEY_RGB, STREAM_LOGO_RGB, WRITE_CONFIG,
+    WRITE_CUSTOM_RGB, WRITE_KEYMAP, WRITE_SCREEN_IMG,
 };
 
 pub const CONFIG_LEN: usize = 0x32; // 50 字节
 pub const KEY_SLOTS: usize = 126;
 pub const KEYMAP_LEN: usize = KEY_SLOTS * 3; // 378 字节
+pub const CUSTOM_RGB_LEN: usize = KEY_SLOTS * 3; // 378 字节 (126 键 × RGB)
+
+#[derive(Debug, Clone, Copy)]
+pub struct SavedDirectLightState {
+    pub prev_light_mode: u8,
+    pub prev_logo_mode: u8,
+}
 
 fn clamp_u8(v: i64, lo: i64, hi: i64) -> u8 {
     v.clamp(lo, hi) as u8
@@ -56,6 +65,7 @@ pub fn decode_kb_config(buf: &[u8]) -> Value {
             "direction": b(4),
             "multiColor": b(5) != 0,
             "color": rgb_to_hex(b(6), b(7), b(8)),
+            "customGroup": clamp_u8(b(27) as i64, 0, 3),
         },
         "logo": {
             "mode": b(28),
@@ -117,6 +127,9 @@ pub fn apply_kb_config_patch(base: &[u8], patch: &Value) -> Vec<u8> {
             buf[6] = r;
             buf[7] = g;
             buf[8] = b;
+        }
+        if let Some(v) = l.get("customGroup").and_then(Value::as_i64) {
+            buf[27] = clamp_u8(v, 0, 3);
         }
     }
 
@@ -661,5 +674,112 @@ impl KeyboardAdapter {
         }
         let screen_image = delete_screen_library_bmp(uuid);
         Ok(json!({ "ok": true, "screenImage": screen_image }))
+    }
+
+    /// 读取板载逐键自定义 RGB 方案 (OP 0x0a, offset = group * 0x200, len = 378B)
+    pub fn read_custom_rgb(&mut self, group: u8) -> Result<Value, TransportError> {
+        let g = group.min(3);
+        let base_off = (g as u32) * CUSTOM_RGB_GROUP_STRIDE;
+        let bytes = self.t.read_blob(READ_CUSTOM_RGB, CUSTOM_RGB_LEN, base_off)?;
+        Ok(json!({
+            "ok": true,
+            "group": g,
+            "rgb": bytes,
+            "mock": self.t.is_mock(),
+        }))
+    }
+
+    /// 写入板载逐键自定义 RGB 方案到 Flash (OP 0x0b, 经 0x01/0x02 事务落盘，断电/关软件不丢失)
+    pub fn write_custom_rgb(
+        &mut self,
+        group: u8,
+        rgb_bytes: &[u8],
+        activate: bool,
+    ) -> Result<Value, TransportError> {
+        let g = group.min(3);
+        let mut buf = vec![0u8; CUSTOM_RGB_LEN];
+        let n = rgb_bytes.len().min(CUSTOM_RGB_LEN);
+        buf[..n].copy_from_slice(&rgb_bytes[..n]);
+
+        let base_off = (g as u32) * CUSTOM_RGB_GROUP_STRIDE;
+        self.t.write_blob_tx(WRITE_CUSTOM_RGB, &buf, base_off)?;
+
+        let cfg_val = if activate {
+            let res = self.write_config(&json!({
+                "light": { "mode": KB_MODE_CUSTOM, "customGroup": g }
+            }))?;
+            res.get("config").cloned().unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
+
+        Ok(json!({
+            "ok": true,
+            "group": g,
+            "activated": activate,
+            "config": cfg_val,
+            "mock": self.t.is_mock(),
+        }))
+    }
+
+    /// 进入实时 RAM 编程推流态：保存原板载模式，切至 light.mode=29 (+ 可选 logo.mode=5)
+    pub fn enter_direct_rgb(&mut self, include_logo: bool) -> Result<SavedDirectLightState, TransportError> {
+        let cur = self.t.read_blob(READ_CONFIG, CONFIG_LEN, 0)?;
+        let raw_light = cur.get(1).copied().unwrap_or(0);
+        let raw_logo = cur.get(28).copied().unwrap_or(0);
+        let saved = SavedDirectLightState {
+            prev_light_mode: if raw_light == KB_MODE_DIRECT || raw_light == 30 { 0 } else { raw_light },
+            prev_logo_mode: if raw_logo == KB_LOGO_MODE_DIRECT { 0 } else { raw_logo },
+        };
+
+        let mut next = cur.clone();
+        if next.len() < CONFIG_LEN {
+            next.resize(CONFIG_LEN, 0);
+        }
+        next[1] = KB_MODE_DIRECT;
+        if include_logo {
+            next[28] = KB_LOGO_MODE_DIRECT;
+        }
+        self.t.write_blob_tx(WRITE_CONFIG, &next, 0)?;
+        Ok(saved)
+    }
+
+    /// 退出实时推流态并恢复用户原有板载灯效模式
+    pub fn exit_direct_rgb(&mut self, saved: SavedDirectLightState) -> Result<Value, TransportError> {
+        let cur = self.t.read_blob(READ_CONFIG, CONFIG_LEN, 0)?;
+        let mut next = cur.clone();
+        if next.len() < CONFIG_LEN {
+            next.resize(CONFIG_LEN, 0);
+        }
+        next[1] = saved.prev_light_mode;
+        next[28] = saved.prev_logo_mode;
+        self.t.write_blob_tx(WRITE_CONFIG, &next, 0)?;
+        Ok(json!({
+            "ok": true,
+            "config": decode_kb_config(&next),
+        }))
+    }
+
+    /// 零 Flash 损耗高速推流单帧 RGB（OP 0x12 主键 378B + 可选 OP 0x28 顶部 20 颗 Logo 60B）
+    pub fn stream_rgb_frame(
+        &mut self,
+        keys_rgb: &[u8],
+        logo_rgb: Option<&[u8]>,
+    ) -> Result<(), TransportError> {
+        if !keys_rgb.is_empty() {
+            let mut kbuf = [0u8; CUSTOM_RGB_LEN];
+            let n = keys_rgb.len().min(CUSTOM_RGB_LEN);
+            kbuf[..n].copy_from_slice(&keys_rgb[..n]);
+            self.t.stream_blob(STREAM_KEY_RGB, &kbuf)?;
+        }
+        if let Some(logo) = logo_rgb {
+            if !logo.is_empty() {
+                let mut lbuf = [0u8; LOGO_RGB_LEN];
+                let n = logo.len().min(LOGO_RGB_LEN);
+                lbuf[..n].copy_from_slice(&logo[..n]);
+                self.t.stream_blob(STREAM_LOGO_RGB, &lbuf)?;
+            }
+        }
+        Ok(())
     }
 }

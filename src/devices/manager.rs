@@ -18,7 +18,7 @@ use crate::devices::catalog::{
     DeviceCatalogEntry, DeviceKind, DEVICES, VENDOR_PAGE, VENDOR_USAGE, VIDS,
 };
 use crate::devices::hid_win::{enumerate_hid_devices, HidDeviceInfo};
-use crate::devices::keyboard::KeyboardAdapter;
+use crate::devices::keyboard::{KeyboardAdapter, SavedDirectLightState};
 use crate::devices::mouse::MouseAdapter;
 use crate::devices::transport::Transport;
 use crate::protocol::POLL_STATUS;
@@ -153,6 +153,7 @@ struct ManagerInner {
     sessions: HashMap<String, DeviceSession>,
     preferred_links: HashMap<String, String>,
     last_known_states: HashMap<String, Value>,
+    saved_direct_light: HashMap<String, SavedDirectLightState>,
     last_raw_sig: String,
     last_topo_sig: String,
 }
@@ -161,6 +162,7 @@ struct ManagerInner {
 pub struct DeviceManager {
     inner: Arc<Mutex<ManagerInner>>,
     screen_uploading: Arc<AtomicBool>,
+    rgb_streaming: Arc<AtomicBool>,
     monitor_stop: Arc<AtomicBool>,
 }
 
@@ -344,10 +346,12 @@ impl DeviceManager {
                 sessions: HashMap::new(),
                 preferred_links: HashMap::new(),
                 last_known_states: HashMap::new(),
+                saved_direct_light: HashMap::new(),
                 last_raw_sig: String::new(),
                 last_topo_sig: String::new(),
             })),
             screen_uploading: Arc::new(AtomicBool::new(false)),
+            rgb_streaming: Arc::new(AtomicBool::new(false)),
             monitor_stop: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -802,9 +806,102 @@ impl DeviceManager {
         }
     }
 
+    pub fn read_custom_rgb(&self, device_id: &str, group: u8) -> Result<Value, String> {
+        let mut inner = self.inner.lock().unwrap();
+        match Self::ensure_session(&mut inner, device_id)? {
+            DeviceSession::Keyboard(kb) => kb.read_custom_rgb(group).map_err(|e| e.to_string()),
+            DeviceSession::Mouse(_) => Err("该设备不支持逐键自定义 RGB".to_string()),
+        }
+    }
+
+    pub fn write_custom_rgb(
+        &self,
+        device_id: &str,
+        group: u8,
+        rgb_bytes: &[u8],
+        activate: bool,
+    ) -> Result<Value, String> {
+        let mut inner = self.inner.lock().unwrap();
+        match Self::ensure_session(&mut inner, device_id)? {
+            DeviceSession::Keyboard(kb) => kb
+                .write_custom_rgb(group, rgb_bytes, activate)
+                .map_err(|e| e.to_string()),
+            DeviceSession::Mouse(_) => Err("该设备不支持逐键自定义 RGB".to_string()),
+        }
+    }
+
+    pub fn start_direct_rgb(&self, device_id: &str, include_logo: bool) -> Result<Value, String> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.saved_direct_light.contains_key(device_id) {
+            self.rgb_streaming.store(true, Ordering::SeqCst);
+            return Ok(json!({ "ok": true, "alreadyActive": true }));
+        }
+        let saved = match Self::ensure_session(&mut inner, device_id)? {
+            DeviceSession::Keyboard(kb) => kb
+                .enter_direct_rgb(include_logo)
+                .map_err(|e| e.to_string())?,
+            DeviceSession::Mouse(_) => return Err("该设备不支持实时 RAM 逐键推流".to_string()),
+        };
+        inner.saved_direct_light.insert(device_id.to_string(), saved);
+        self.rgb_streaming.store(true, Ordering::SeqCst);
+        Ok(json!({
+            "ok": true,
+            "includeLogo": include_logo,
+            "prevLightMode": saved.prev_light_mode,
+            "prevLogoMode": saved.prev_logo_mode,
+        }))
+    }
+
+    pub fn stop_direct_rgb(&self, device_id: &str) -> Result<Value, String> {
+        let mut inner = self.inner.lock().unwrap();
+        let saved = inner.saved_direct_light.remove(device_id);
+        if inner.saved_direct_light.is_empty() {
+            self.rgb_streaming.store(false, Ordering::SeqCst);
+        }
+        let Some(saved) = saved else {
+            return Ok(json!({ "ok": true, "restored": false }));
+        };
+        match Self::ensure_session(&mut inner, device_id)? {
+            DeviceSession::Keyboard(kb) => kb.exit_direct_rgb(saved).map_err(|e| e.to_string()),
+            DeviceSession::Mouse(_) => Ok(json!({ "ok": true, "restored": false })),
+        }
+    }
+
+    pub fn stream_rgb_frame(
+        &self,
+        device_id: &str,
+        keys_rgb: &[u8],
+        logo_rgb: Option<&[u8]>,
+    ) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        match Self::ensure_session(&mut inner, device_id)? {
+            DeviceSession::Keyboard(kb) => kb
+                .stream_rgb_frame(keys_rgb, logo_rgb)
+                .map_err(|e| e.to_string()),
+            DeviceSession::Mouse(_) => Err("该设备不支持实时 RAM 逐键推流".to_string()),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn is_direct_rgb_active(&self, device_id: &str) -> bool {
+        self.inner
+            .lock()
+            .map(|i| i.saved_direct_light.contains_key(device_id))
+            .unwrap_or(false)
+    }
+
     pub fn close_all_sessions(&self) {
         self.monitor_stop.store(true, Ordering::SeqCst);
+        self.rgb_streaming.store(false, Ordering::SeqCst);
         if let Ok(mut inner) = self.inner.lock() {
+            // 退出软件前自动恢复正在实时推流的键盘原板载灯效，避免键盘停留在空白 RAM 帧
+            let saved_list: Vec<(String, SavedDirectLightState)> =
+                inner.saved_direct_light.drain().collect();
+            for (dev_id, saved) in saved_list {
+                if let Some(DeviceSession::Keyboard(kb)) = inner.sessions.get_mut(&dev_id) {
+                    let _ = kb.exit_direct_rgb(saved);
+                }
+            }
             inner.sessions.clear();
         }
     }
@@ -824,7 +921,10 @@ impl DeviceManager {
             let mut last_sleep_poll = Instant::now();
             while !mgr.monitor_stop.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_secs(4));
-                if mgr.monitor_stop.load(Ordering::SeqCst) || mgr.screen_uploading.load(Ordering::SeqCst) {
+                if mgr.monitor_stop.load(Ordering::SeqCst)
+                    || mgr.screen_uploading.load(Ordering::SeqCst)
+                    || mgr.rgb_streaming.load(Ordering::SeqCst)
+                {
                     continue;
                 }
 
@@ -886,7 +986,9 @@ impl DeviceManager {
                     };
 
                     for id in ids {
-                        if mgr.screen_uploading.load(Ordering::SeqCst) {
+                        if mgr.screen_uploading.load(Ordering::SeqCst)
+                            || mgr.rgb_streaming.load(Ordering::SeqCst)
+                        {
                             break;
                         }
                         if let Ok(b) = mgr.read_battery(&id) {
@@ -1021,9 +1123,32 @@ mod tests {
             Some("A1:B2:C3:D4:E5:F6".into()),
         );
         let mut kb_bt = KeyboardAdapter::new(tbt, "bt:test".into(), None);
-        let bt_st = kb_bt.read_state().unwrap();
-        assert_eq!(bt_st["linkState"], "bt-readonly");
-        assert_eq!(bt_st["battery"], 82);
+        let kb_bt_st = kb_bt.read_state().unwrap();
+        assert_eq!(kb_bt_st["linkState"], "bt-readonly");
+        assert_eq!(kb_bt_st["battery"], 82);
         assert!(kb_bt.write_config(&json!({"system": {"winLock": true}})).is_err());
+
+        // 5. 逐键自定义 RGB 板载写入 (OP 0x0a/0x0b) + 实时 RAM 推流 (OP 0x12/0x28) 与退出恢复
+        let mut custom_rgb = vec![0u8; 126 * 3];
+        custom_rgb[0..3].copy_from_slice(&[229, 57, 69]);
+        custom_rgb[42..45].copy_from_slice(&[0, 210, 255]);
+        let wr_rgb = mgr.write_custom_rgb("kb-1s", 1, &custom_rgb, true).unwrap();
+        assert_eq!(wr_rgb["ok"], true);
+        assert_eq!(wr_rgb["config"]["light"]["mode"], 18);
+        assert_eq!(wr_rgb["config"]["light"]["customGroup"], 1);
+        let rd_rgb = mgr.read_custom_rgb("kb-1s", 1).unwrap();
+        assert_eq!(rd_rgb["rgb"][0], 229);
+        assert_eq!(rd_rgb["rgb"][43], 210);
+
+        let st_dir = mgr.start_direct_rgb("kb-1s", true).unwrap();
+        assert_eq!(st_dir["ok"], true);
+        assert_eq!(st_dir["prevLightMode"], 18);
+        assert!(mgr.is_direct_rgb_active("kb-1s"));
+        let logo_rgb = vec![255u8; 60];
+        mgr.stream_rgb_frame("kb-1s", &custom_rgb, Some(&logo_rgb)).unwrap();
+        let stop_dir = mgr.stop_direct_rgb("kb-1s").unwrap();
+        assert_eq!(stop_dir["ok"], true);
+        assert_eq!(stop_dir["config"]["light"]["mode"], 18);
+        assert!(!mgr.is_direct_rgb_active("kb-1s"));
     }
 }

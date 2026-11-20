@@ -53,6 +53,22 @@
       safeInvoke("device_screen_lib_delete", { id, uuid }),
     pickScreenFile: () => safeInvoke("screen_pick_file"),
     pasteScreenClipboard: () => safeInvoke("screen_paste_clipboard"),
+    readCustomRgb: (id, group) => safeInvoke("device_custom_rgb_read", { id, group }),
+    writeCustomRgb: (id, group, rgb, activate = true) =>
+      safeInvoke("device_custom_rgb_write", { id, group, rgb, activate }),
+    startDirectRgb: (id, includeLogo = true) =>
+      safeInvoke("studio_direct_start", { id, includeLogo }),
+    stopDirectRgb: (id) => safeInvoke("studio_direct_stop", { id }),
+    streamRgbFrame: (id, keysRgb, logoRgb = null) =>
+      safeInvoke("studio_stream_frame", { id, keysRgb, logoRgb }),
+    setStudioSensors: (audio, ambilight, keys) =>
+      safeInvoke("studio_sensors_set", { audio, ambilight, keys }),
+    pollStudioTelemetry: () => safeInvoke("studio_telemetry"),
+    startExternalRgbServer: (id, udpPort, httpPort, includeLogo = true) =>
+      safeInvoke("studio_server_start", { id, udpPort, httpPort, includeLogo }),
+    stopExternalRgbServer: () => safeInvoke("studio_server_stop"),
+    exportStudioPreset: (name, content) => safeInvoke("studio_export_preset", { name, content }),
+    importStudioPreset: () => safeInvoke("studio_import_preset"),
     onScreenProgress: (cb) => bindEvent("screen:progress", cb),
     onDeviceEvent: (cb) => bindEvent("device:event", cb),
     win: {

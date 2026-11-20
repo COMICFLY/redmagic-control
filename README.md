@@ -10,6 +10,10 @@
 | :---: | :---: |
 | ![GK001S 灯光管理](docs/screenshots/kb-lighting.png) | ![GK001S 小屏图片选择器](docs/screenshots/kb-screen.png) |
 
+| 灯效编程工作室（JS Shader + 零损耗 RAM 推流） | 板载逐键涂色（4 组 Flash 持久化方案） |
+| :---: | :---: |
+| ![GK001S 灯效编程工作室](docs/screenshots/kb-studio.png) | ![GK001S 板载逐键涂色](docs/screenshots/kb-paint.png) |
+
 | GS001S 鼠标 · 5 档 DPI 与传感器控制 |
 | :---: |
 | ![GS001S 鼠标概览与 DPI](docs/screenshots/ms-overview.png) |
@@ -28,6 +32,7 @@
   - [3.4 配置块字节布局（GK001S 50B / GS001S 84B）](#34-配置块字节布局gk001s-50b--gs001s-84b)
   - [3.5 硬件键位映射编码（3B Assignment）](#35-硬件键位映射编码3b-assignment)
   - [3.6 GK001S 320×172 小屏壁纸写入协议](#36-gk001s-320172-小屏壁纸写入协议)
+  - [3.7 GK001S 可编程灯效协议与本地控灯 API](#37-gk001s-可编程灯效协议与本地控灯-api)
 - [4. 快速构建与命令行自检](#4-快速构建与命令行自检)
 - [5. 目录结构与版本管理规范](#5-目录结构与版本管理规范)
 
@@ -50,6 +55,8 @@
 | 实时电量与充电状态 | 支持 (`OP 0x1a`) | 支持 (`OP 0x1a`) | 支持 (GATT `0x180F` 系统属性) |
 | 回报率 / DPI / LOD / 系统开关 | 支持 (`OP 0x05/0x06`) | 支持 (`OP 0x05/0x06`) | 只读（固件未开放蓝牙私有写通道） |
 | RGB 灯光与 Logo 灯条控制 | 支持 (`OP 0x05/0x06`) | 支持 (`OP 0x05/0x06`) | 只读 |
+| 板载逐键静态涂色（4 组 Flash） | 支持 (`OP 0x0a/0x0b`) | 支持 (`OP 0x0a/0x0b`) | 只读（板载方案依然生效） |
+| 可编程灯效 / 音律 / 屏幕联动 / 本地 API | 支持 (`OP 0x12/0x28`, 30 FPS) | 支持 (`OP 0x12/0x28`, 8 FPS) | 仅界面实时预览 |
 | 物理按键映射与出厂 ROM 恢复 | 支持 (`OP 0x07/0x08/0x09`) | 支持 (`OP 0x07/0x08/0x09`) | 只读 |
 | GK001S 320×172 小屏壁纸写入 | 支持 (`OP 0x23/0x25`, 128 KB) | 仅支持本地裁切与存图库 | 仅支持本地裁切与存图库 |
 
@@ -63,7 +70,7 @@
 ```mermaid
 flowchart LR
   UI["原生前端 UI (WebView2)<br/>毛玻璃界面 / 灯效预览 / 小屏裁切器"]
-  Bridge["Tauri v2 IPC<br/>src/commands.rs (16 个命令 + 事件推送)"]
+  Bridge["Tauri v2 IPC<br/>src/commands.rs (27 个命令 + 事件推送)"]
   Mgr["DeviceManager<br/>三模聚合 / 链路优先级 / 后台监控线程"]
   Adp["设备适配器<br/>Keyboard (GK001S) / Mouse (GS001S)"]
   Trans["统一 Transport 层<br/>64B 帧构造 / 分包 / 重试 / 事务"]
@@ -146,9 +153,13 @@ flowchart LR
 | `0x07` | `READ_KEYMAP_ROM` | 读取出厂只读 ROM 默认键表（用于对比修改项与恢复默认） |
 | `0x08` | `READ_KEYMAP_USER` | 读取当前用户生效键表 |
 | `0x09` | `WRITE_KEYMAP` | 写入用户键表（需包裹在 `0x01` ~ `0x02` 事务中） |
+| `0x0A` | `READ_CUSTOM_RGB` | 读取板载逐键静态 RGB 方案（4 组槽位，偏移 `group * 0x200`，长度 `378 B`） |
+| `0x0B` | `WRITE_CUSTOM_RGB` | 写入板载逐键静态 RGB 方案到 Flash（经 `0x01` ~ `0x02` 事务落盘，配合 `light.mode = 18`） |
+| `0x12` | `STREAM_KEY_RGB` | **纯 RAM 实时逐键推流**（`378 B` RGB，无需 `0x01/0x02` 事务，**零 Flash 损耗**，`light.mode = 29`） |
 | `0x1A` | `POLL_STATUS` | 实时查询电量与充电状态：`data[0] = 0..100 (%)`，`data[1] = 0 放电 / 1 充电中 / 2 已充满` |
 | `0x23` | `PREPARE_SCREEN_IMG` | GK001S 静态小屏壁纸写前握手（仅 USB 有线） |
 | `0x25` | `WRITE_SCREEN_IMG` | GK001S 静态小屏壁纸流式写入（24-bit 偏移 `0x000000..0x01FFFF` → Flash `0xCE0000`） |
+| `0x28` | `STREAM_LOGO_RGB` | **纯 RAM 顶部 20 颗 Logo 灯条推流**（`60 B` RGB，无需事务，**零 Flash 损耗**，`logo.mode = 5`） |
 | `0x50` | `WIRELESS_NACK` | 2.4G 接收器回包：键鼠休眠或未切至 2.4G 档位时对非 `0xAA` 指令立即返回 |
 | `0xAA` | `HEARTBEAT` | 2.4G 无线唤醒 / 在线握手探测；设备在线时回复 `data[0] == 0xFF` |
 
@@ -184,7 +195,8 @@ flowchart LR
 | `19` | `system.wasdSwap` | WASD 与方向键互换（`0 / 1`） |
 | `21` | `system.winLock` | 锁定 Win 键（`0 / 1`） |
 | `22` | `system.pollingRate` | 回报率枚举：`0 = 1000Hz`, `1 = 500Hz`, `2 = 250Hz`, `3 = 125Hz` |
-| `28` | `logo.mode` | 顶部 26 格 Logo 灯条模式（`0/1/2/3/8`） |
+| `27` | `light.customGroup` | 板载逐键自定义 RGB 当前激活组索引（`0..3`，对应 `OP 0x0a/0x0b` 偏移 `group * 0x200`） |
+| `28` | `logo.mode` | 顶部 20 颗 Logo 灯条模式（`0/1/2/3/8`，`5 = 实时 RAM 直推`） |
 | `29 / 31` | `screen.isGif / frameCount` | 小屏静态/动图标志与帧数（写静态图时固定置 `isGif=0, frameCount=1`） |
 | `32` | `system.lowPower` | 低功耗模式（`0 / 1`） |
 | `33` | `system.altF4` | 屏蔽 Alt + F4（`0 / 1`） |
@@ -235,6 +247,24 @@ flowchart LR
    - **全部写入完成后静默 `2100 ms`**：固件 SysTick 需连续静默满 `2000 ms` 才会清除传输标志并触发物理 LCD 刷新。
 5. **本机图库兼容**：由于硬件不支持通过 USB 读回当前屏幕画面，同步后会将图片保存为 24-bit BMP 并更新 `%LOCALAPPDATA%\Goper\keyboard\ScreenFileList.ini`，与官方驱动图库双向互通。
 
+### 3.7 GK001S 可编程灯效协议与本地控灯 API
+
+「灯效编程」工作室（`src/studio/` + `ui/src/renderer/studio.js`）完整实现了 4 套互补的可编程灯效链路：
+
+1. **板载逐键静态涂色（`OP 0x0a` / `OP 0x0b`，持久化）**：
+   - `126 × 3 = 378 B` 严格按 `(R, G, B)` 通道顺序映射物理 `hwSlot`，共 4 组独立板载槽位（偏移 `group * 0x200`，当前激活组存在 50B 配置块 `buf[27]`，配合 `light.mode = 18`）；
+   - 支持画笔拖拽涂色、右键擦除、吸管取色与 6 套游戏/主题分区模板，写入 Flash 后断电、切 2.4G / 蓝牙依然保持。
+2. **零损耗纯 RAM 实时推流 + JS Shader 引擎（`OP 0x12` + `OP 0x28`）**：
+   - 切换键盘配置 `light.mode = 29 (0x1D)`、`logo.mode = 5` 后，直接经 `OP 0x12 (378 B)` 与 `OP 0x28 (60 B)` 写入 MCU 易失 RAM，**跳过 `0x01/0x02` 事务、零 Flash 擦写损耗**；停止推流或退出软件时自动恢复原有板载灯效模式。
+   - 内置热更新 JS Shader 编辑器 `render(x, y, t, ctx) -> [r, g, b]`、6 套脚本预设、实时 `p1/p2/p3` 参数滑块与 `.json`/`.js` 导入导出。
+3. **纯 Rust Windows 系统联动传感器 + 多图层混合器**：
+   - **WASAPI 系统回环频谱**（`src/studio/audio.rs`）：原生捕获系统输出音频并执行内置 512 点 Radix-2 FFT 16 段频谱 + 自适应 AGC；
+   - **屏幕流光溢彩**（`src/studio/ambilight.rs`）：Win32 GDI 采样主显示器 `16×6` 色彩网格及顶部 20 点边缘色（自动映射至顶部 Logo 灯条）；
+   - **全局打字涟漪**（`src/studio/keyhook.rs`）：60 Hz `GetAsyncKeyState` 物理坐标脉冲感知。
+4. **本地回环外部控灯桥（`src/studio/server.rs`，严格绑定 `127.0.0.1`）**：
+   - **高速 UDP（默认 `127.0.0.1:27650`）**：支持二进制帧 `b"RMGB" + flags(0x01 主键 / 0x02 Logo / 0x03 全部) + 378B/60B RGB`（`<1 ms` 延迟）及 JSON 帧；
+   - **HTTP & WebSocket（默认 `127.0.0.1:27651`）**：支持 `GET /api/status`、`POST /api/rgb`（`{"fill":[r,g,b]}` / `{"keys":[...]}` / `{"slots":{"14":[255,0,0]}}`）与 RFC 6455 `WS /ws` 实时流，供 Python / Node / C++ / 游戏插件 / AI Agent 直接控制键盘灯光。
+
 ---
 
 ## 4. 快速构建与命令行自检
@@ -273,10 +303,11 @@ cargo build --release
 ├── icons/                      # 应用图标
 ├── src/
 │   ├── main.rs                 # 入口、单实例锁、Win11 DWM Acrylic、WebView2 容错与 --probe
-│   ├── commands.rs             # Tauri v2 IPC 命令（设备控制、原生选图、剪贴板读图）
+│   ├── commands.rs             # Tauri v2 IPC 命令（设备控制、灯效编程、原生选图、剪贴板）
 │   ├── protocol/               # 64B HID 帧编解码、校验和、3B 键位编码与出厂 ROM 表
-│   └── devices/                # Win32 HID/BLE 底层、GK001S/GS001S 适配器、三模管理器、小屏图库
-└── ui/                         # 零框架原生前端（暗黑曜石毛玻璃 + 实时灯效动画 + 小屏裁切器）
+│   ├── devices/                # Win32 HID/BLE 底层、GK001S/GS001S 适配器、三模管理器、小屏图库
+│   └── studio/                 # WASAPI 频谱、屏幕流光溢彩、全局按键感知、127.0.0.1 UDP/HTTP/WS 桥
+└── ui/                         # 零框架原生前端（暗黑曜石毛玻璃 + 灯效编程工作室 + 小屏裁切器）
 ```
 
 ### 版本管理规范

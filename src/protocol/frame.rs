@@ -7,7 +7,9 @@
 //!   [7]     Status/Sub 发送填 (off >> 16) & 0xff；接收 0x00=OK，0xff/0xfe=Error
 //!   [8..64] Payload    有效数据区（最多 56B，未用补 0）
 
-use super::{FRAME_SIZE, HEARTBEAT, POLL_STATUS, REPORT_ID, WIRELESS_NACK};
+use super::{
+    FRAME_SIZE, HEARTBEAT, POLL_STATUS, REPORT_ID, STREAM_KEY_RGB, STREAM_LOGO_RGB, WIRELESS_NACK,
+};
 
 #[derive(Debug, Clone)]
 pub struct HidFrame {
@@ -83,6 +85,10 @@ pub fn matches_header(frame: &HidFrame, op: u8, len: usize, off: u32) -> bool {
     if op == POLL_STATUS {
         return frame.off == (off & 0xffff) as u16
             && (frame.len == (len & 0xff) as u8 || frame.len == 0);
+    }
+    // 实时 RAM 逐键/Logo 灯效流（对齐 Goper.exe 0x4dfb15：仅校验 op 回包一致即可）
+    if op == STREAM_KEY_RGB || op == STREAM_LOGO_RGB {
+        return true;
     }
     if op == 0x21 || op == 0x25 || op == 0x2c {
         return frame.len == (len & 0xff) as u8

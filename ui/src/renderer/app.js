@@ -1,15 +1,26 @@
 /* 轻量前端主控制器：统一状态、IPC 驱动、键盘物理录入与实时硬件同步。 */
 
 import { icon } from "./icons.js";
-import { renderConnectionBanner, renderPageTelemetry, renderOverview, renderLighting, renderKeymap, renderScreen, renderHardware } from "./panels.js";
+import { renderConnectionBanner, renderPageTelemetry, renderOverview, renderLighting, renderKeymap, renderScreen, renderHardware, renderStudio } from "./panels.js";
 import { renderBatteryGauge, renderConnectionBadge } from "./stage.js";
 import { LightingAnimator } from "./lighting.js";
+import {
+  STUDIO_SCRIPTS,
+  StudioController,
+  applyPaintTemplate,
+  buildExternalExamplePython,
+  createInitialStudioState,
+  hexToRgb,
+  rgbToHex,
+} from "./studio.js";
 
 const lighting = new LightingAnimator();
+const studioCtrl = new StudioController();
 
 const TABS = [
   { id: "overview", label: "概览与性能", ico: "sliders" },
   { id: "lighting", label: "灯光", ico: "sun" },
+  { id: "studio", label: "灯效编程", ico: "sparkles", kbOnly: true },
   { id: "keymap", label: "按键映射", ico: "command" },
   { id: "screen", label: "小屏图片", ico: "monitor", kbOnly: true },
   { id: "hardware", label: "硬件诊断", ico: "cpu" },
@@ -67,6 +78,10 @@ const state = {
     screenDataUrl: null,
     screenUploading: false,
     screenUploadPct: 0,
+    studio: {
+      ...createInitialStudioState(),
+      scriptSensors: { ...STUDIO_SCRIPTS[0].sensors },
+    },
   },
   busy: false,
 };
@@ -115,7 +130,7 @@ function renderChrome() {
 function renderNavTabs() {
   const dev = currentDevice();
   const isKb = !dev || dev.kind === "keyboard";
-  if (!isKb && state.tab === "screen") state.tab = "overview";
+  if (!isKb && (state.tab === "screen" || state.tab === "studio")) state.tab = "overview";
   const visibleTabs = TABS.filter((t) => !t.kbOnly || isKb);
   $("#nav-tabs").innerHTML = visibleTabs.map((t) =>
     `<button type="button" class="nav-tab" role="tab" data-tab="${t.id}" aria-selected="${state.tab === t.id}">${icon(t.ico, 15)}<span>${t.label}</span></button>`
@@ -178,17 +193,136 @@ function renderDeviceRail() {
   $("#conn-dot").className = `status-dot ${state.busy ? "is-busy" : (liveDevs.length > 0 ? (onlineCount > 0 ? "is-live" : "is-mock") : "is-mock")}`;
 }
 
+function updateStudioLiveStats(st) {
+  if (state.tab !== "studio") return;
+  const dev = currentDevice();
+  const hw = dev && state.hwStates.get(dev.id);
+  const is24g = (hw?.connectionMode || dev?.connectionMode) === "2.4g";
+
+  const pill = $("#studio-live-pill");
+  if (pill) {
+    if (st.serverStatus?.running) {
+      pill.className = "conn-badge is-24g";
+      pill.textContent = `外部接口接管 · ${st.serverStatus.fps || 0} FPS`;
+    } else if (st.streaming) {
+      pill.className = "conn-badge is-24g";
+      pill.textContent = `RAM 实时推流 · ${st.streamFps || (is24g ? 8 : 30)} FPS`;
+    } else if (st.subMode === "paint") {
+      pill.className = "conn-badge is-wired";
+      pill.textContent = `板载逐键 · 组 ${st.paintGroup + 1}`;
+    } else {
+      pill.className = "conn-badge";
+      pill.textContent = "仅预览 · 未推流";
+    }
+  }
+
+  const errEl = $("#studio-code-err");
+  if (errEl) {
+    if (st.scriptError) {
+      errEl.hidden = false;
+      errEl.textContent = st.scriptError;
+    } else {
+      errEl.hidden = true;
+      errEl.textContent = "";
+    }
+  }
+
+  const audStatus = $("#studio-audio-status");
+  if (audStatus) {
+    audStatus.textContent = st.telemetry?.audio?.error || "实时采集";
+  }
+  const bands = st.telemetry?.audio?.bands;
+  if (Array.isArray(bands)) {
+    for (const bar of document.querySelectorAll(".studio-eq-bar[data-band]")) {
+      const idx = Number(bar.dataset.band);
+      const pct = Math.max(8, Math.round((bands[idx] || 0) * 100));
+      bar.style.height = `${pct}%`;
+    }
+  }
+
+  const srvState = $("#studio-srv-state");
+  const srvRate = $("#studio-srv-rate");
+  if (srvState && srvRate && st.serverStatus) {
+    srvState.textContent = st.serverStatus.running ? "运行中 (127.0.0.1)" : "已停止";
+    srvRate.textContent = `${st.serverStatus.packets || 0} 帧 · ${st.serverStatus.fps || 0} FPS`;
+  }
+}
+
+async function syncStudioSensors() {
+  if (!window.rm?.setStudioSensors) return;
+  const st = state.ui.studio;
+  let audio = false;
+  let ambilight = false;
+  let keys = false;
+  if (state.tab === "studio") {
+    if (st.subMode === "layers") {
+      audio = Boolean(st.layers.audio.enabled);
+      ambilight = Boolean(st.layers.ambilight.enabled);
+      keys = Boolean(st.layers.typing.enabled);
+    } else if (st.subMode === "script") {
+      audio = Boolean(st.scriptSensors?.audio);
+      ambilight = Boolean(st.scriptSensors?.ambilight);
+      keys = Boolean(st.scriptSensors?.keys);
+    }
+  }
+  try {
+    const res = await callApi("setStudioSensors", audio, ambilight, keys);
+    st.telemetry.audio.active = Boolean(res.audio);
+    st.telemetry.ambilight.active = Boolean(res.ambilight);
+    st.telemetry.keys.active = Boolean(res.keys);
+  } catch (_) {}
+}
+
+async function stopStudioStreamingIfNeeded(silent = false) {
+  const st = state.ui.studio;
+  if (!st.streaming) return;
+  const dev = state.devices.find((d) => d.kind === "keyboard") || currentDevice();
+  st.streaming = false;
+  st.streamFps = 0;
+  if (dev && window.rm?.stopDirectRgb) {
+    try {
+      await callApi("stopDirectRgb", dev.id);
+      if (!silent) toast("已恢复板载灯效", "已自动关闭实时 RAM 推流并还原原灯效");
+    } catch (_) {}
+  }
+}
+
+async function loadPaintGroupFromHw(group, { forceOverwrite = true, silent = false } = {}) {
+  const dev = currentDevice();
+  if (!dev || dev.kind !== "keyboard") return;
+  const hw = state.hwStates.get(dev.id);
+  if (hw && !hw.mock && hw.supportsConfig === false) return;
+  const st = state.ui.studio;
+  try {
+    const res = await callApi("readCustomRgb", dev.id, group);
+    const bytes = Array.isArray(res?.rgb) ? res.rgb : [];
+    const hasAny = bytes.some((b) => b !== 0);
+    if (forceOverwrite || hasAny) {
+      st.paintRgb.fill(0);
+      for (let i = 0; i < Math.min(378, bytes.length); i++) {
+        st.paintRgb[i] = bytes[i];
+      }
+    }
+    st.paintLoaded = true;
+    if (!silent) toast("已读取板载逐键方案", `组 ${group + 1} (${hasAny ? "已加载灯色" : "当前为空白"})`);
+  } catch (err) {
+    if (!silent) toast("读取板载逐键方案失败", err.message, true);
+  }
+}
+
 function renderWorkspace() {
   const dev = currentDevice();
   const root = $("#workspace");
   if (!dev) {
     lighting.stop();
+    studioCtrl.detach();
     root.innerHTML = `<div class="card"><h2 class="card-title">未发现设备</h2><p class="card-desc">请连接 REDMAGIC 外设（USB 有线 / 2.4G 接收器 / 蓝牙 BLE）后点击左侧刷新按钮。</p></div>`;
     return;
   }
   const hw = state.hwStates.get(dev.id);
   if (!hw) {
     lighting.stop();
+    studioCtrl.detach();
     root.innerHTML = `<div class="card"><h2 class="card-title">${esc(dev.name)}</h2><p class="card-desc">正在通过 ${esc(dev.connectionLabel || "HID")} 读取板载配置…</p></div>`;
     return;
   }
@@ -197,6 +331,7 @@ function renderWorkspace() {
   let bodyHtml = "";
   if (state.tab === "overview") bodyHtml = renderOverview(dev, hw, state.meta, state.ui);
   else if (state.tab === "lighting") bodyHtml = renderLighting(dev, hw, state.meta, state.ui);
+  else if (state.tab === "studio") bodyHtml = renderStudio(dev, hw, state.ui);
   else if (state.tab === "keymap") bodyHtml = renderKeymap(dev, hw, state.meta, state.ui);
   else if (state.tab === "screen") bodyHtml = renderScreen(dev, hw, state.ui);
   else bodyHtml = renderHardware(dev, hw);
@@ -220,7 +355,20 @@ function renderWorkspace() {
     ${bodyHtml}
   `;
 
-  lighting.start(root, dev, hw);
+  if (state.tab === "studio" && dev.kind === "keyboard") {
+    lighting.stop();
+    studioCtrl.attach(
+      root,
+      () => ({ studio: state.ui.studio, dev: currentDevice(), hw: state.hwStates.get(currentDevice()?.id) }),
+      updateStudioLiveStats
+    );
+    if (state.ui.studio.subMode === "paint" && !state.ui.studio.paintLoaded) {
+      loadPaintGroupFromHw(state.ui.studio.paintGroup, { forceOverwrite: false, silent: true });
+    }
+  } else {
+    studioCtrl.detach();
+    lighting.start(root, dev, hw);
+  }
   if (state.tab === "screen") paintScreenCanvas();
 }
 
@@ -558,11 +706,18 @@ function bindEvents() {
   $("#win-close").addEventListener("click", () => window.rm?.win.close());
 
   // 顶部导航
-  $("#nav-tabs").addEventListener("click", (e) => {
+  $("#nav-tabs").addEventListener("click", async (e) => {
     const btn = e.target.closest("[data-tab]");
     if (!btn) return;
+    const prevTab = state.tab;
     state.tab = btn.dataset.tab;
     state.ui.capturingKey = false;
+    if (prevTab === "studio" && state.tab !== "studio") {
+      await stopStudioStreamingIfNeeded(false);
+      await syncStudioSensors();
+    } else if (state.tab === "studio" && prevTab !== "studio") {
+      syncStudioSensors();
+    }
     if (state.tab === "keymap" && state.ui.selectedSlot === null) {
       const dev = currentDevice();
       if (dev) selectSlot(dev.kind === "keyboard" ? 0 : 3);
@@ -574,6 +729,10 @@ function bindEvents() {
   $("#device-list").addEventListener("click", async (e) => {
     const item = e.target.closest("[data-device-id]");
     if (!item || item.dataset.deviceId === state.activeId) return;
+    if (state.tab === "studio") {
+      await stopStudioStreamingIfNeeded(false);
+      await syncStudioSensors();
+    }
     state.activeId = item.dataset.deviceId;
     state.ui.selectedSlot = null;
     state.ui.keyCategory = null;
@@ -994,12 +1153,244 @@ function bindEvents() {
         state.busy = false;
         renderAll();
       }
+      return;
+    }
+
+    /* ---- 灯效编程工作室按钮事件 ---- */
+    const st = state.ui.studio;
+    if (el.dataset.studioSub) {
+      const nextSub = el.dataset.studioSub;
+      if (nextSub === st.subMode) return;
+      if ((nextSub === "paint" || nextSub === "api") && st.streaming) {
+        await stopStudioStreamingIfNeeded(false);
+      }
+      st.subMode = nextSub;
+      await syncStudioSensors();
+      renderWorkspace();
+      return;
+    }
+    if (el.dataset.paintGroup !== undefined) {
+      const g = Number(el.dataset.paintGroup);
+      st.paintGroup = g;
+      await loadPaintGroupFromHw(g, { forceOverwrite: true, silent: false });
+      renderWorkspace();
+      return;
+    }
+    if (el.dataset.paintTool) {
+      st.paintTool = el.dataset.paintTool;
+      renderWorkspace();
+      return;
+    }
+    if (el.dataset.paintSwatch) {
+      st.paintColor = el.dataset.paintSwatch;
+      if (st.paintTool === "eraser") st.paintTool = "brush";
+      renderWorkspace();
+      return;
+    }
+    if (el.dataset.paintTpl) {
+      const names = { redmagic: "红魔战甲", fps: "FPS WASD", moba: "MOBA QWER", cyber: "赛博渐变", white: "纯白极简", clear: "全黑清空" };
+      applyPaintTemplate(st.paintRgb, el.dataset.paintTpl);
+      toast("已套用逐键模板", names[el.dataset.paintTpl] || el.dataset.paintTpl);
+      return;
+    }
+    if (el.id === "studio-paint-read-btn") {
+      await loadPaintGroupFromHw(st.paintGroup, { forceOverwrite: true, silent: false });
+      return;
+    }
+    if (el.id === "studio-paint-write-btn") {
+      const dev = currentDevice();
+      if (!dev || dev.kind !== "keyboard") return;
+      state.busy = true;
+      setSyncText("写入逐键配色...", "is-busy");
+      renderDeviceRail();
+      try {
+        const res = await callApi("writeCustomRgb", dev.id, st.paintGroup, Array.from(st.paintRgb), true);
+        const hw = state.hwStates.get(dev.id);
+        if (hw && res.config) hw.config = res.config;
+        setSyncText(res.mock ? "仿真逐键已写入" : "板载逐键已写入", res.mock ? "is-mock" : "is-live");
+        toast("板载逐键配色已写入并启用", `OP 0x0b 组 ${st.paintGroup + 1} · 断电/切无线不丢失`);
+      } catch (err) {
+        setSyncText("写入失败");
+        toast("写入逐键配色失败", err.message, true);
+      } finally {
+        state.busy = false;
+        renderDeviceRail();
+      }
+      return;
+    }
+    if (el.dataset.studioScript) {
+      const preset = STUDIO_SCRIPTS.find((s) => s.id === el.dataset.studioScript);
+      if (!preset) return;
+      st.scriptId = preset.id;
+      st.scriptCode = preset.code;
+      st.scriptError = "";
+      st.p1 = preset.p1;
+      st.p2 = preset.p2;
+      st.p3 = preset.p3;
+      st.scriptSensors = { ...preset.sensors };
+      await syncStudioSensors();
+      renderWorkspace();
+      return;
+    }
+    if (el.id === "studio-export-btn") {
+      const payload = {
+        kind: "redmagic-rgb-preset",
+        version: 1,
+        scriptId: st.scriptId,
+        scriptCode: st.scriptCode,
+        p1: st.p1,
+        p2: st.p2,
+        p3: st.p3,
+        scriptSensors: st.scriptSensors,
+        layers: st.layers,
+        paintRgb: Array.from(st.paintRgb),
+      };
+      try {
+        const res = await callApi("exportStudioPreset", `redmagic-${st.scriptId || "custom"}.json`, JSON.stringify(payload, null, 2));
+        if (res && !res.canceled) {
+          toast("灯效方案已导出", res.filePath || "");
+        }
+      } catch (err) {
+        toast("导出方案失败", err.message, true);
+      }
+      return;
+    }
+    if (el.id === "studio-import-btn") {
+      try {
+        const res = await callApi("importStudioPreset");
+        if (!res || res.canceled || !res.content) return;
+        const text = String(res.content);
+        if (String(res.name || "").toLowerCase().endsWith(".js")) {
+          st.scriptId = "custom";
+          st.scriptCode = text;
+          st.scriptError = "";
+          st.subMode = "script";
+        } else {
+          const parsed = JSON.parse(text);
+          if (typeof parsed.scriptCode === "string") {
+            st.scriptId = parsed.scriptId || "custom";
+            st.scriptCode = parsed.scriptCode;
+            st.scriptError = "";
+          }
+          if (typeof parsed.p1 === "number") st.p1 = parsed.p1;
+          if (typeof parsed.p2 === "number") st.p2 = parsed.p2;
+          if (typeof parsed.p3 === "number") st.p3 = parsed.p3;
+          if (parsed.scriptSensors) st.scriptSensors = { ...st.scriptSensors, ...parsed.scriptSensors };
+          if (parsed.layers) st.layers = { ...st.layers, ...parsed.layers };
+          if (Array.isArray(parsed.paintRgb) && parsed.paintRgb.length >= 378) {
+            for (let i = 0; i < 378; i++) st.paintRgb[i] = parsed.paintRgb[i] & 0xff;
+          }
+        }
+        await syncStudioSensors();
+        renderWorkspace();
+        toast("灯效方案已导入", res.name || "");
+      } catch (err) {
+        toast("导入方案失败", err.message, true);
+      }
+      return;
+    }
+    if (el.id === "studio-stream-btn") {
+      const dev = currentDevice();
+      if (!dev || dev.kind !== "keyboard") return;
+      if (st.streaming) {
+        await stopStudioStreamingIfNeeded(true);
+        setSyncText("已恢复板载灯效", dev.mock ? "is-mock" : "is-live");
+        toast("已停止实时推流", "键盘已自动还原原有板载灯效");
+        renderWorkspace();
+      } else {
+        try {
+          if (st.serverStatus?.running) {
+            st.serverStatus = await callApi("stopExternalRgbServer");
+          }
+          await callApi("startDirectRgb", dev.id, st.includeLogo);
+          st.streaming = true;
+          st.streamFps = 0;
+          setSyncText("RAM 实时推流中", "is-live");
+          toast("已开启实时 RAM 推流", "OP 0x12 + OP 0x28 直写内存 · 零 Flash 损耗");
+          renderWorkspace();
+        } catch (err) {
+          toast("开启实时推流失败", err.message, true);
+        }
+      }
+      return;
+    }
+    if (el.id === "studio-server-toggle-btn") {
+      const dev = currentDevice();
+      if (!dev || dev.kind !== "keyboard") return;
+      try {
+        if (st.serverStatus?.running) {
+          st.serverStatus = await callApi("stopExternalRgbServer");
+          setSyncText("已停止外部接口", dev.mock ? "is-mock" : "is-live");
+          toast("外部控灯桥已停止", "键盘已恢复原板载灯效");
+        } else {
+          if (st.streaming) {
+            st.streaming = false;
+            st.streamFps = 0;
+          }
+          st.serverStatus = await callApi("startExternalRgbServer", dev.id, st.udpPort, st.httpPort, st.includeLogo);
+          setSyncText("外部控灯桥运行中", "is-live");
+          toast("本地回环控灯桥已启动", `UDP 127.0.0.1:${st.udpPort} · HTTP/WS 127.0.0.1:${st.httpPort}`);
+        }
+        renderWorkspace();
+      } catch (err) {
+        toast("控灯服务操作失败", err.message, true);
+      }
+      return;
+    }
+    if (el.id === "studio-copy-api-btn") {
+      const sample = buildExternalExamplePython(st.udpPort, st.httpPort);
+      navigator.clipboard?.writeText(sample);
+      toast("已复制 Python 控灯示例代码", `UDP ${st.udpPort} / HTTP+WS ${st.httpPort}`);
+      return;
     }
   });
 
-  // 滑块拖动即时更新标签数值，小屏缩放/底色/文字输入即时重绘预览
+  // 滑块拖动即时更新标签数值，小屏缩放/底色/文字输入即时重绘预览，灯效编程热更新
   ws.addEventListener("input", (e) => {
     const el = e.target;
+    const st = state.ui.studio;
+    if (el.id === "studio-code-editor") {
+      st.scriptCode = el.value;
+      return;
+    }
+    if (el.dataset.studioParam) {
+      const p = el.dataset.studioParam;
+      st[p] = Number(el.value) / 100;
+      const valEl = $(`#studio-${p}-val`);
+      if (valEl) valEl.textContent = `${el.value}%`;
+      return;
+    }
+    if (el.id === "studio-bri-range") {
+      st.brightness = Number(el.value) / 100;
+      const valEl = $("#studio-bri-val");
+      if (valEl) valEl.textContent = `${el.value}%`;
+      return;
+    }
+    if (el.id === "studio-paint-picker") {
+      st.paintColor = el.value;
+      if (st.paintTool === "eraser") st.paintTool = "brush";
+      return;
+    }
+    if (el.dataset.layerRange) {
+      const [lk, fk] = el.dataset.layerRange.split(".");
+      if (st.layers[lk]) st.layers[lk][fk] = Number(el.value) / 100;
+      return;
+    }
+    if (el.dataset.layerField) {
+      const [lk, fk] = el.dataset.layerField.split(".");
+      if (st.layers[lk]) st.layers[lk][fk] = el.value;
+      return;
+    }
+    if (el.id === "studio-udp-port") {
+      const v = Number(el.value);
+      if (v >= 1024 && v <= 65535) st.udpPort = v;
+      return;
+    }
+    if (el.id === "studio-http-port") {
+      const v = Number(el.value);
+      if (v >= 1024 && v <= 65535) st.httpPort = v;
+      return;
+    }
     if (el.id === "screen-zoom-range") {
       state.ui.screenZoom = Number(el.value) / 100;
       const valEl = $("#screen-zoom-val");
@@ -1030,9 +1421,48 @@ function bindEvents() {
     }
   });
 
-  // 交互式 320×172 画布鼠标拖拽平移构图（支持指针捕获，丝滑 60fps）
+  // 逐键涂色拖拽绘制 + 交互式 320×172 画布鼠标拖拽平移构图
   let panDrag = null;
+  let paintDrag = null;
+
+  function applyPaintAtSlot(slot, mode) {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= 126) return;
+    const st = state.ui.studio;
+    const o = slot * 3;
+    if (mode === "eyedropper") {
+      const hex = rgbToHex(st.paintRgb[o], st.paintRgb[o + 1], st.paintRgb[o + 2]);
+      st.paintColor = hex;
+      st.paintTool = "brush";
+      renderWorkspace();
+      toast("已吸取按键颜色", hex.toUpperCase());
+      return;
+    }
+    if (mode === "erase") {
+      st.paintRgb[o] = 0;
+      st.paintRgb[o + 1] = 0;
+      st.paintRgb[o + 2] = 0;
+    } else {
+      const [r, g, b] = hexToRgb(st.paintColor);
+      st.paintRgb[o] = r;
+      st.paintRgb[o + 1] = g;
+      st.paintRgb[o + 2] = b;
+    }
+  }
+
   ws.addEventListener("pointerdown", (e) => {
+    const paintKey = e.target.closest(".kb-paint-hit");
+    if (paintKey && (e.button === 0 || e.button === 2)) {
+      e.preventDefault();
+      const slot = Number(paintKey.dataset.paintSlot);
+      const st = state.ui.studio;
+      const mode = e.button === 2 ? "erase" : st.paintTool === "eyedropper" ? "eyedropper" : st.paintTool === "eraser" ? "erase" : "paint";
+      applyPaintAtSlot(slot, mode);
+      if (mode !== "eyedropper") {
+        paintDrag = { pointerId: e.pointerId, mode, lastSlot: slot };
+      }
+      return;
+    }
+
     const box = e.target.closest("#screen-drop-zone");
     if (!box || e.button !== 0 || !canTransformCurrentScreen()) return;
     e.preventDefault();
@@ -1052,6 +1482,17 @@ function bindEvents() {
   });
 
   ws.addEventListener("pointermove", (e) => {
+    if (paintDrag && e.pointerId === paintDrag.pointerId) {
+      const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest?.(".kb-paint-hit");
+      if (hit) {
+        const slot = Number(hit.dataset.paintSlot);
+        if (slot !== paintDrag.lastSlot) {
+          paintDrag.lastSlot = slot;
+          applyPaintAtSlot(slot, paintDrag.mode);
+        }
+      }
+      return;
+    }
     if (!panDrag || e.pointerId !== panDrag.pointerId) return;
     state.ui.screenPanX = Math.max(-320, Math.min(320, panDrag.basePanX + (e.clientX - panDrag.startX) * panDrag.scaleX));
     state.ui.screenPanY = Math.max(-220, Math.min(220, panDrag.basePanY + (e.clientY - panDrag.startY) * panDrag.scaleY));
@@ -1061,13 +1502,16 @@ function bindEvents() {
   });
 
   const endPan = (e) => {
+    if (paintDrag && (!e || e.pointerId === paintDrag.pointerId)) {
+      paintDrag = null;
+    }
     if (!panDrag || (e && e.pointerId !== panDrag.pointerId)) return;
     panDrag.box.classList.remove("is-dragging");
     try { panDrag.box.releasePointerCapture?.(panDrag.pointerId); } catch (_) {}
     panDrag = null;
   };
-  ws.addEventListener("pointerup", endPan);
-  ws.addEventListener("pointercancel", endPan);
+  window.addEventListener("pointerup", endPan);
+  window.addEventListener("pointercancel", endPan);
 
   // 画布鼠标滚轮缩放 (50% ~ 300%)
   ws.addEventListener("wheel", (e) => {
@@ -1087,8 +1531,18 @@ function bindEvents() {
     paintScreenCanvas();
   }, { passive: false });
 
-  // 键盘回车/空格激活图库缩略卡
+  // 键盘回车/空格激活图库缩略卡 + 脚本编辑器 Tab 缩进支持
   ws.addEventListener("keydown", (e) => {
+    if (e.target.id === "studio-code-editor" && e.key === "Tab") {
+      e.preventDefault();
+      const ta = e.target;
+      const start = ta.selectionStart;
+      const end = ta.selectionEnd;
+      ta.value = `${ta.value.slice(0, start)}  ${ta.value.slice(end)}`;
+      ta.selectionStart = ta.selectionEnd = start + 2;
+      state.ui.studio.scriptCode = ta.value;
+      return;
+    }
     if (e.key !== "Enter" && e.key !== " ") return;
     const card = e.target.closest("[data-screen-lib-uuid]");
     if (!card || e.target.closest("button")) return;
@@ -1128,6 +1582,45 @@ function bindEvents() {
   // 工作区委托事件（change：开关、滑块松手、颜色选择器、下拉、数值输入）
   ws.addEventListener("change", async (e) => {
     const el = e.target;
+    const st = state.ui.studio;
+    if (el.id === "studio-logo-sync") {
+      st.includeLogo = el.checked;
+      if (st.streaming) {
+        const dev = currentDevice();
+        if (dev && dev.kind === "keyboard") {
+          try {
+            await callApi("stopDirectRgb", dev.id);
+            await callApi("startDirectRgb", dev.id, st.includeLogo);
+          } catch (_) {}
+        }
+      }
+      return;
+    }
+    if (el.dataset.studioSensor) {
+      st.scriptSensors[el.dataset.studioSensor] = el.checked;
+      await syncStudioSensors();
+      renderWorkspace();
+      return;
+    }
+    if (el.dataset.layerToggle) {
+      const lk = el.dataset.layerToggle;
+      if (st.layers[lk]) st.layers[lk].enabled = el.checked;
+      await syncStudioSensors();
+      renderWorkspace();
+      return;
+    }
+    if (el.id === "studio-paint-picker") {
+      st.paintColor = el.value;
+      renderWorkspace();
+      return;
+    }
+    if (el.id === "studio-udp-port" || el.id === "studio-http-port") {
+      const clamped = Math.max(1024, Math.min(65535, Number(el.value) || (el.id === "studio-udp-port" ? 27650 : 27651)));
+      if (el.id === "studio-udp-port") st.udpPort = clamped;
+      else st.httpPort = clamped;
+      renderWorkspace();
+      return;
+    }
     if (el.dataset.kbToggle) {
       await patchConfig(setNested({}, el.dataset.kbToggle, el.checked), "键盘开关已同步");
       return;
@@ -1269,8 +1762,8 @@ async function boot() {
         }
       }
       renderDeviceRail();
-      // 仅在非小屏编辑页刷新 KPI，避免打断取景裁切操作
-      if (activeChanged && state.tab !== "screen") renderWorkspace();
+      // 仅在非小屏/非灯效编程页刷新 KPI，避免打断取景裁切、脚本输入或拖拽涂色
+      if (activeChanged && state.tab !== "screen" && state.tab !== "studio") renderWorkspace();
       return;
     }
     if (evt.type === "topology" && Array.isArray(evt.devices)) {
@@ -1312,12 +1805,32 @@ async function boot() {
     const params = new URLSearchParams(window.location.search);
     const initDev = params.get("device");
     const initTab = params.get("tab");
+    const initSub = params.get("sub");
+    const initScript = params.get("script");
     if (initTab && TABS.some((t) => t.id === initTab)) state.tab = initTab;
+    if (initSub && ["paint", "script", "layers", "api"].includes(initSub)) {
+      state.ui.studio.subMode = initSub;
+    }
+    if (initScript) {
+      const found = STUDIO_SCRIPTS.find((s) => s.id === initScript);
+      if (found) {
+        state.ui.studio.scriptId = found.id;
+        state.ui.studio.scriptCode = found.code;
+        state.ui.studio.p1 = found.p1;
+        state.ui.studio.p2 = found.p2;
+        state.ui.studio.p3 = found.p3;
+        state.ui.studio.scriptSensors = { ...found.sensors };
+      }
+    }
     state.activeId = (initDev && state.devices.some((d) => d.id === initDev))
       ? initDev
       : (state.devices[0]?.id || null);
     renderAll();
     if (state.activeId) await loadDeviceState(state.activeId);
+    if (state.tab === "studio") {
+      await syncStudioSensors();
+      renderWorkspace();
+    }
     // 后台预拉其余在线设备电量，左侧栏立即可见
     for (const d of state.devices) {
       if (d.id !== state.activeId) {

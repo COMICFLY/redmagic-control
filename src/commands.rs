@@ -10,9 +10,12 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::devices::catalog::get_metadata_json;
 use crate::devices::manager::{DeviceDescriptor, DeviceManager};
+use crate::studio::server::{DEFAULT_HTTP_PORT, DEFAULT_UDP_PORT};
+use crate::studio::StudioEngine;
 
 pub struct AppState {
     pub manager: DeviceManager,
+    pub studio: StudioEngine,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -260,4 +263,175 @@ pub async fn screen_paste_clipboard() -> Result<Value, String> {
     })
     .await
     .map_err(|e| format!("读取剪贴板失败: {e}"))?
+}
+
+/* ---- 灯效编程工作室：板载逐键 RGB / 实时 RAM 推流 / 传感器遥测 / 本地外部 API 桥 ---- */
+
+#[tauri::command]
+pub async fn device_custom_rgb_read(
+    state: State<'_, AppState>,
+    id: String,
+    group: u8,
+) -> Result<Value, String> {
+    let mgr = state.manager.clone();
+    tokio::task::spawn_blocking(move || mgr.read_custom_rgb(&id, group))
+        .await
+        .map_err(|e| format!("读取逐键配色异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn device_custom_rgb_write(
+    state: State<'_, AppState>,
+    id: String,
+    group: u8,
+    rgb: Vec<u8>,
+    activate: bool,
+) -> Result<Value, String> {
+    let mgr = state.manager.clone();
+    tokio::task::spawn_blocking(move || mgr.write_custom_rgb(&id, group, &rgb, activate))
+        .await
+        .map_err(|e| format!("写入板载逐键配色异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn studio_direct_start(
+    state: State<'_, AppState>,
+    id: String,
+    include_logo: bool,
+) -> Result<Value, String> {
+    let mgr = state.manager.clone();
+    tokio::task::spawn_blocking(move || mgr.start_direct_rgb(&id, include_logo))
+        .await
+        .map_err(|e| format!("开启实时灯效推流异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn studio_direct_stop(state: State<'_, AppState>, id: String) -> Result<Value, String> {
+    let mgr = state.manager.clone();
+    let studio = state.studio.clone();
+    tokio::task::spawn_blocking(move || {
+        if studio.server.is_running() {
+            studio.server.stop(&mgr);
+        }
+        mgr.stop_direct_rgb(&id)
+    })
+    .await
+    .map_err(|e| format!("停止实时灯效推流异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn studio_stream_frame(
+    state: State<'_, AppState>,
+    id: String,
+    keys_rgb: Vec<u8>,
+    logo_rgb: Option<Vec<u8>>,
+) -> Result<Value, String> {
+    let mgr = state.manager.clone();
+    tokio::task::spawn_blocking(move || {
+        mgr.stream_rgb_frame(&id, &keys_rgb, logo_rgb.as_deref())?;
+        Ok::<Value, String>(json!({ "ok": true }))
+    })
+    .await
+    .map_err(|e| format!("实时帧推送异常: {e}"))?
+}
+
+#[tauri::command]
+pub fn studio_sensors_set(
+    state: State<'_, AppState>,
+    audio: bool,
+    ambilight: bool,
+    keys: bool,
+) -> Value {
+    state.studio.set_sensors(audio, ambilight, keys);
+    json!({
+        "ok": true,
+        "audio": state.studio.audio.is_running(),
+        "ambilight": state.studio.ambilight.is_running(),
+        "keys": state.studio.keys.is_running(),
+    })
+}
+
+#[tauri::command]
+pub fn studio_telemetry(state: State<'_, AppState>) -> Value {
+    serde_json::to_value(state.studio.poll_telemetry()).unwrap_or_else(|_| json!({}))
+}
+
+#[tauri::command]
+pub async fn studio_server_start(
+    state: State<'_, AppState>,
+    id: String,
+    udp_port: Option<u16>,
+    http_port: Option<u16>,
+    include_logo: Option<bool>,
+) -> Result<Value, String> {
+    let mgr = state.manager.clone();
+    let srv = state.studio.server.clone();
+    let up = udp_port.unwrap_or(DEFAULT_UDP_PORT);
+    let hp = http_port.unwrap_or(DEFAULT_HTTP_PORT);
+    let logo = include_logo.unwrap_or(true);
+    tokio::task::spawn_blocking(move || {
+        let st = srv.start(mgr, id, up, hp, logo)?;
+        Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
+    })
+    .await
+    .map_err(|e| format!("启动外部控灯服务异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn studio_server_stop(state: State<'_, AppState>) -> Result<Value, String> {
+    let mgr = state.manager.clone();
+    let srv = state.studio.server.clone();
+    tokio::task::spawn_blocking(move || {
+        let st = srv.stop(&mgr);
+        Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
+    })
+    .await
+    .map_err(|e| format!("停止外部控灯服务异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn studio_export_preset(name: String, content: String) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let default_name = if name.trim().is_empty() {
+            "redmagic-rgb-preset.json".to_string()
+        } else if name.ends_with(".json") {
+            name
+        } else {
+            format!("{name}.json")
+        };
+        let picked = rfd::FileDialog::new()
+            .set_title("导出灯效编程方案")
+            .set_file_name(&default_name)
+            .add_filter("灯效方案 (JSON)", &["json"])
+            .save_file();
+        let Some(path) = picked else {
+            return Ok(json!({ "canceled": true }));
+        };
+        fs::write(&path, content.as_bytes()).map_err(|e| format!("保存方案失败: {e}"))?;
+        Ok(json!({ "canceled": false, "filePath": path.to_string_lossy() }))
+    })
+    .await
+    .map_err(|e| format!("导出对话框异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn studio_import_preset() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| {
+        let picked = rfd::FileDialog::new()
+            .set_title("导入灯效编程方案")
+            .add_filter("灯效方案 (JSON / JS)", &["json", "js"])
+            .pick_file();
+        let Some(path) = picked else {
+            return Ok(json!({ "canceled": true }));
+        };
+        let content = fs::read_to_string(&path).map_err(|e| format!("读取方案失败: {e}"))?;
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("preset.json")
+            .to_string();
+        Ok(json!({ "canceled": false, "name": name, "content": content }))
+    })
+    .await
+    .map_err(|e| format!("导入对话框异常: {e}"))?
 }
