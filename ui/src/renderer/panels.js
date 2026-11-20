@@ -3,7 +3,7 @@
 
 import { icon } from "./icons.js";
 import { renderConnectionBadge, renderKeyboardStage, renderMouseStage } from "./stage.js";
-import { STUDIO_SCRIPTS, buildExternalExamplePython } from "./studio.js";
+import { STUDIO_SCRIPTS, buildExternalExamplePython, formatFps } from "./studio.js";
 
 const SWATCHES = [
   "#e53945", "#ff6b2c", "#f5c518", "#22c55e", "#14b8a6",
@@ -840,9 +840,9 @@ export function renderStudio(device, hwState, ui) {
   // 左下状态胶囊
   let livePillHtml = `<span class="conn-badge" id="studio-live-pill">仅预览 · 未推流</span>`;
   if (st.serverStatus?.running) {
-    livePillHtml = `<span class="conn-badge is-24g" id="studio-live-pill">外部接口接管 · ${st.serverStatus.fps || 0} FPS</span>`;
+    livePillHtml = `<span class="conn-badge is-24g" id="studio-live-pill">外部接口接管 · ${formatFps(st.serverStatus.fps)} FPS</span>`;
   } else if (st.streaming) {
-    livePillHtml = `<span class="conn-badge is-24g" id="studio-live-pill">RAM 实时推流 · ${st.streamFps || (is24g ? 8 : 30)} FPS</span>`;
+    livePillHtml = `<span class="conn-badge is-24g" id="studio-live-pill">RAM 实时推流 · ${formatFps(st.streamFps || (is24g ? 8 : 30))} FPS</span>`;
   } else if (sub === "paint") {
     livePillHtml = `<span class="conn-badge is-wired" id="studio-live-pill">板载逐键 · 组 ${st.paintGroup + 1}</span>`;
   }
@@ -1096,7 +1096,7 @@ export function renderStudio(device, hwState, ui) {
 
         <div class="studio-api-stats">
           <div class="spec-item"><dt>服务状态</dt><dd class="mono" id="studio-srv-state">${srv.running ? "运行中 (127.0.0.1)" : "已停止"}</dd></div>
-          <div class="spec-item"><dt>已收帧 / 实时帧率</dt><dd class="mono" id="studio-srv-rate">${srv.packets || 0} 帧 · ${srv.fps || 0} FPS</dd></div>
+          <div class="spec-item"><dt>已收帧 / 实时帧率</dt><dd class="mono" id="studio-srv-rate">${srv.packets || 0} 帧 · ${formatFps(srv.fps)} FPS</dd></div>
         </div>
 
         <div class="stack-sm">

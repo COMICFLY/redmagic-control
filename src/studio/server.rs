@@ -34,7 +34,7 @@ pub struct ExternalServerStatus {
     pub udp_port: u16,
     pub http_port: u16,
     pub packets: u64,
-    pub fps: f32,
+    pub fps: f64,
     pub last_source: String,
     pub error: Option<String>,
 }
@@ -46,7 +46,7 @@ struct FrameBuffers {
     last_source: String,
     window_start: Instant,
     window_frames: u32,
-    fps: f32,
+    fps: f64,
     last_error: Option<String>,
 }
 
@@ -368,9 +368,9 @@ fn handle_payload(
         fb.last_source = source.to_string();
         fb.last_error = None;
         fb.window_frames += 1;
-        let elapsed = fb.window_start.elapsed().as_secs_f32();
+        let elapsed = fb.window_start.elapsed().as_secs_f64();
         if elapsed >= 0.5 {
-            fb.fps = (fb.window_frames as f32 / elapsed * 10.0).round() / 10.0;
+            fb.fps = ((fb.window_frames as f64 / elapsed) * 10.0).round() / 10.0;
             fb.window_frames = 0;
             fb.window_start = Instant::now();
         }

@@ -178,13 +178,13 @@ impl NativeStreamConfig {
 pub struct NativeStreamStatus {
     pub running: bool,
     pub device_id: String,
-    pub fps: f32,
+    pub fps: f64,
     pub config: NativeStreamConfig,
 }
 
 struct RunnerState {
     device_id: String,
-    fps: f32,
+    fps: f64,
     config: NativeStreamConfig,
 }
 
@@ -298,9 +298,9 @@ impl NativeRgbRunner {
                     .is_ok()
                 {
                     fps_count += 1;
-                    let win_s = fps_win.elapsed().as_secs_f32();
+                    let win_s = fps_win.elapsed().as_secs_f64();
                     if win_s >= 0.6 {
-                        let fps = ((fps_count as f32 / win_s) * 10.0).round() / 10.0;
+                        let fps = ((fps_count as f64 / win_s) * 10.0).round() / 10.0;
                         if let Ok(mut st) = state.lock() {
                             st.fps = fps;
                         }

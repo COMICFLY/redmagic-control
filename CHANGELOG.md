@@ -5,6 +5,11 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-11-20
+
+### Fixed
+- **Fixed IEEE-754 long floating-point digits on FPS readouts**: Changed Rust `fps` fields in `NativeRgbRunner` (`src/studio/runner.rs`) and `ExternalRgbServer` (`src/studio/server.rs`) from `f32` to rounded `f64` (eliminating `f32`-to-`f64` `serde_json` artifacts like `29.299999237060547`) and unified all frontend FPS badges (`#studio-live-pill`, `#rail-stream-fps`, `#studio-srv-rate`) through fixed 1-decimal `formatFps()`.
+
 ## [0.4.2] - 2026-11-20
 
 ### Fixed & Optimized

@@ -11,6 +11,7 @@ import {
   buildExternalExamplePython,
   buildNativeConfig,
   createInitialStudioState,
+  formatFps,
   hexToRgb,
   isNativeEligible,
   rgbToHex,
@@ -248,7 +249,7 @@ function renderRailStreamCard() {
         <span class="stream-pulse-dot" aria-hidden="true"></span>
         <span>${title}</span>
       </span>
-      <span class="mono rail-stream-fps" id="rail-stream-fps">${fps} FPS</span>
+      <span class="mono rail-stream-fps" id="rail-stream-fps">${formatFps(fps)} FPS</span>
     </button>
     <div class="rail-stream-sub" title="点击关闭或挂起至托盘将释放界面进程，后台极低占用持续推流">${esc(subHint)}</div>
     <div class="rail-stream-actions">
@@ -304,7 +305,7 @@ function updateStudioLiveStats(st) {
     const fps = st.serverStatus?.running
       ? (st.serverStatus.fps || 0)
       : (st.streamFps || (is24g ? 8 : 30));
-    railFps.textContent = `${fps} FPS`;
+    railFps.textContent = `${formatFps(fps)} FPS`;
   }
 
   if (state.tab !== "studio") return;
@@ -313,10 +314,10 @@ function updateStudioLiveStats(st) {
   if (pill) {
     if (st.serverStatus?.running) {
       pill.className = "conn-badge is-24g";
-      pill.textContent = `外部接口接管 · ${st.serverStatus.fps || 0} FPS`;
+      pill.textContent = `外部接口接管 · ${formatFps(st.serverStatus.fps)} FPS`;
     } else if (st.streaming) {
       pill.className = "conn-badge is-24g";
-      pill.textContent = `RAM 实时推流 · ${st.streamFps || (is24g ? 8 : 30)} FPS`;
+      pill.textContent = `RAM 实时推流 · ${formatFps(st.streamFps || (is24g ? 8 : 30))} FPS`;
     } else if (st.subMode === "paint") {
       pill.className = "conn-badge is-wired";
       pill.textContent = `板载逐键 · 组 ${st.paintGroup + 1}`;
@@ -354,7 +355,7 @@ function updateStudioLiveStats(st) {
   const srvRate = $("#studio-srv-rate");
   if (srvState && srvRate && st.serverStatus) {
     srvState.textContent = st.serverStatus.running ? "运行中 (127.0.0.1)" : "已停止";
-    srvRate.textContent = `${st.serverStatus.packets || 0} 帧 · ${st.serverStatus.fps || 0} FPS`;
+    srvRate.textContent = `${st.serverStatus.packets || 0} 帧 · ${formatFps(st.serverStatus.fps)} FPS`;
   }
 }
 

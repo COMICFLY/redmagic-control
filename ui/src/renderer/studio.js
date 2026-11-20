@@ -294,6 +294,12 @@ export function createInitialStudioState() {
   };
 }
 
+export function formatFps(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  return n.toFixed(1);
+}
+
 export function isNativeEligible(studio) {
   if (!studio) return false;
   if (studio.streamSource === "layers") return true;
