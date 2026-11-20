@@ -8,12 +8,16 @@ mod studio;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use commands::AppState;
 use devices::manager::DeviceManager;
 use studio::StudioEngine;
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::window::{Color, Effect, EffectsBuilder};
-use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 fn install_panic_logger() {
     std::panic::set_hook(Box::new(|info| {
@@ -47,7 +51,7 @@ fn acquire_single_instance() -> Option<SingleInstanceGuard> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
     };
 
     let name: Vec<u16> = OsStr::new("Local\\REDMAGIC_Control_RS_SingleInstance")
@@ -67,6 +71,7 @@ fn acquire_single_instance() -> Option<SingleInstanceGuard> {
                 .collect();
             let hwnd = FindWindowW(null(), title.as_ptr());
             if !hwnd.is_null() {
+                ShowWindow(hwnd, SW_SHOW);
                 ShowWindow(hwnd, SW_RESTORE);
                 SetForegroundWindow(hwnd);
             }
@@ -178,6 +183,10 @@ fn build_main_window(
         .center()
         .devtools(allow_devtools)
         .zoom_hotkeys_enabled(false)
+        // 禁止 Chromium 在最小化、遮挡或托盘挂起时对定时器降频，确保后台实时推流稳帧 30 FPS
+        .additional_browser_args(
+            "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows",
+        )
         .effects(effects)
         .data_directory(data_dir)
         .build()
@@ -229,8 +238,18 @@ fn main() {
     let manager = DeviceManager::new(force_mock);
     let studio = StudioEngine::new();
     let monitor_mgr = manager.clone();
+    let close_mgr = manager.clone();
+    let close_studio = studio.clone();
+    let tray_mgr = manager.clone();
+    let tray_studio = studio.clone();
     let cleanup_mgr = manager.clone();
     let cleanup_studio = studio.clone();
+    let force_quit = Arc::new(AtomicBool::new(false));
+    let close_force_quit = force_quit.clone();
+    let tray_force_quit = force_quit.clone();
+    let headless_shot = std::env::var("REDMAGIC_VIEW")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
 
     tauri::Builder::default()
         .manage(AppState { manager, studio })
@@ -272,6 +291,88 @@ fn main() {
             }
             let _ = win.set_focus();
 
+            // 推流或外部控灯服务运行期间，点击关闭窗口自动挂起至系统托盘继续推流
+            let win_for_close = win.clone();
+            win.on_window_event(move |event| {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    let streaming_now =
+                        close_mgr.has_any_direct_rgb() || close_studio.server.is_running();
+                    if streaming_now && !close_force_quit.load(Ordering::SeqCst) {
+                        api.prevent_close();
+                        let _ = win_for_close.hide();
+                        let _ = win_for_close
+                            .emit("studio:tray-hidden", serde_json::json!({ "ok": true }));
+                    }
+                }
+            });
+
+            // Windows 系统托盘图标与右键菜单（支持后台挂起推流、一键恢复窗口、一键停止推流、彻底退出）
+            if !headless_shot {
+                let show_item = MenuItemBuilder::with_id("show", "打开 REDMAGIC Control").build(app)?;
+                let stop_item = MenuItemBuilder::with_id("stop_stream", "停止灯效推流（恢复板载）").build(app)?;
+                let quit_item = MenuItemBuilder::with_id("quit", "退出程序").build(app)?;
+                let tray_menu = MenuBuilder::new(app)
+                    .items(&[&show_item, &stop_item, &quit_item])
+                    .build()?;
+
+                let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+                    .tooltip("REDMAGIC Control — 支持后台挂起灯效推流")
+                    .menu(&tray_menu)
+                    .show_menu_on_left_click(false)
+                    .on_tray_icon_event(|tray, event| {
+                        let restore = matches!(
+                            event,
+                            TrayIconEvent::Click {
+                                button: MouseButton::Left,
+                                button_state: MouseButtonState::Up,
+                                ..
+                            } | TrayIconEvent::DoubleClick {
+                                button: MouseButton::Left,
+                                ..
+                            }
+                        );
+                        if restore {
+                            if let Some(w) = tray.app_handle().get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.unminimize();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    })
+                    .on_menu_event(move |app_handle, event| match event.id().as_ref() {
+                        "show" => {
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.unminimize();
+                                let _ = w.set_focus();
+                            }
+                        }
+                        "stop_stream" => {
+                            tray_studio.set_sensors(false, false, false);
+                            if tray_studio.server.is_running() {
+                                tray_studio.server.stop(&tray_mgr);
+                            }
+                            tray_mgr.stop_all_direct_rgb();
+                            let _ = app_handle.emit(
+                                "studio:stopped",
+                                serde_json::json!({ "source": "tray" }),
+                            );
+                        }
+                        "quit" => {
+                            tray_force_quit.store(true, Ordering::SeqCst);
+                            tray_studio.shutdown(&tray_mgr);
+                            tray_mgr.close_all_sessions();
+                            app_handle.exit(0);
+                        }
+                        _ => {}
+                    });
+
+                if let Some(ico) = app.default_window_icon() {
+                    tray_builder = tray_builder.icon(ico.clone());
+                }
+                let _tray = tray_builder.build(app)?;
+            }
+
             let handle = app.handle().clone();
             monitor_mgr.start_monitor(move |evt| {
                 let _ = handle.emit("device:event", evt);
@@ -280,6 +381,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_meta,
+            commands::app_hide_to_tray,
             commands::device_list,
             commands::device_rescan,
             commands::device_wake,

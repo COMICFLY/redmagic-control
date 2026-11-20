@@ -191,13 +191,86 @@ function renderDeviceRail() {
     $("#conn-text").textContent = `仿真模式 · ${state.devices.length} 台`;
   }
   $("#conn-dot").className = `status-dot ${state.busy ? "is-busy" : (liveDevs.length > 0 ? (onlineCount > 0 ? "is-live" : "is-mock") : "is-mock")}`;
+  renderRailStreamCard();
+}
+
+function keyboardDevice() {
+  return state.devices.find((d) => d.kind === "keyboard") || null;
+}
+
+function getStudioBgState() {
+  const kb = keyboardDevice();
+  return {
+    studio: state.ui.studio,
+    dev: kb,
+    hw: kb ? state.hwStates.get(kb.id) : null,
+  };
+}
+
+function studioSourceLabel(st) {
+  if (st.serverStatus?.running) return `UDP ${st.udpPort} / WS ${st.httpPort}`;
+  if (st.streamSource === "layers") return "多图层实时混合";
+  const preset = STUDIO_SCRIPTS.find((s) => s.id === st.scriptId);
+  return preset ? preset.name : "自定义 JS 脚本";
+}
+
+function renderRailStreamCard() {
+  const card = $("#rail-stream-card");
+  if (!card) return;
+  const st = state.ui.studio;
+  const active = Boolean(st.streaming || st.serverStatus?.running);
+  if (!active) {
+    card.hidden = true;
+    card.innerHTML = "";
+    return;
+  }
+  const kb = keyboardDevice();
+  const hw = kb && state.hwStates.get(kb.id);
+  const is24g = (hw?.connectionMode || kb?.connectionMode) === "2.4g";
+  const fps = st.serverStatus?.running
+    ? (st.serverStatus.fps || 0)
+    : (st.streamFps || (is24g ? 8 : 30));
+  const title = st.serverStatus?.running ? "外部控灯桥运行中" : "灯效后台推流中";
+
+  card.hidden = false;
+  card.innerHTML = `
+    <button type="button" class="rail-stream-head" id="rail-jump-studio" title="点击返回灯效编程工作台">
+      <span class="rail-stream-title">
+        <span class="stream-pulse-dot" aria-hidden="true"></span>
+        <span>${title}</span>
+      </span>
+      <span class="mono rail-stream-fps" id="rail-stream-fps">${fps} FPS</span>
+    </button>
+    <div class="rail-stream-sub" title="点击关闭按钮或最小化将保持后台稳帧推流">${esc(studioSourceLabel(st))} · 支持托盘挂起</div>
+    <div class="rail-stream-actions">
+      <button type="button" class="btn btn-secondary btn-sm" id="rail-tray-btn" title="隐藏到 Windows 系统托盘继续推流">${icon("minus", 12)}挂起至托盘</button>
+      <button type="button" class="btn btn-danger btn-sm" id="rail-stop-stream-btn" title="停止推流并恢复键盘原板载灯效">${icon("stop", 12)}停止</button>
+    </div>`;
+}
+
+async function hideWindowToTray() {
+  if (!window.rm?.hideToTray) return;
+  try {
+    await callApi("hideToTray");
+  } catch (err) {
+    toast("挂起至托盘失败", err.message, true);
+  }
 }
 
 function updateStudioLiveStats(st) {
+  const kb = keyboardDevice();
+  const hw = kb && state.hwStates.get(kb.id);
+  const is24g = (hw?.connectionMode || kb?.connectionMode) === "2.4g";
+
+  const railFps = $("#rail-stream-fps");
+  if (railFps && (st.streaming || st.serverStatus?.running)) {
+    const fps = st.serverStatus?.running
+      ? (st.serverStatus.fps || 0)
+      : (st.streamFps || (is24g ? 8 : 30));
+    railFps.textContent = `${fps} FPS`;
+  }
+
   if (state.tab !== "studio") return;
-  const dev = currentDevice();
-  const hw = dev && state.hwStates.get(dev.id);
-  const is24g = (hw?.connectionMode || dev?.connectionMode) === "2.4g";
 
   const pill = $("#studio-live-pill");
   if (pill) {
@@ -254,15 +327,29 @@ async function syncStudioSensors() {
   let audio = false;
   let ambilight = false;
   let keys = false;
+
+  // 1. 若后台正在实时推流，优先保障推流源所需的传感器持续工作（即使切换至其他页面或挂起至托盘）
+  if (st.streaming) {
+    if (st.streamSource === "layers") {
+      audio = audio || Boolean(st.layers.audio.enabled);
+      ambilight = ambilight || Boolean(st.layers.ambilight.enabled);
+      keys = keys || Boolean(st.layers.typing.enabled);
+    } else {
+      audio = audio || Boolean(st.scriptSensors?.audio);
+      ambilight = ambilight || Boolean(st.scriptSensors?.ambilight);
+      keys = keys || Boolean(st.scriptSensors?.keys);
+    }
+  }
+  // 2. 前台处于灯效编程页时，合并当前预览模式所需的传感器
   if (state.tab === "studio") {
     if (st.subMode === "layers") {
-      audio = Boolean(st.layers.audio.enabled);
-      ambilight = Boolean(st.layers.ambilight.enabled);
-      keys = Boolean(st.layers.typing.enabled);
+      audio = audio || Boolean(st.layers.audio.enabled);
+      ambilight = ambilight || Boolean(st.layers.ambilight.enabled);
+      keys = keys || Boolean(st.layers.typing.enabled);
     } else if (st.subMode === "script") {
-      audio = Boolean(st.scriptSensors?.audio);
-      ambilight = Boolean(st.scriptSensors?.ambilight);
-      keys = Boolean(st.scriptSensors?.keys);
+      audio = audio || Boolean(st.scriptSensors?.audio);
+      ambilight = ambilight || Boolean(st.scriptSensors?.ambilight);
+      keys = keys || Boolean(st.scriptSensors?.keys);
     }
   }
   try {
@@ -275,16 +362,26 @@ async function syncStudioSensors() {
 
 async function stopStudioStreamingIfNeeded(silent = false) {
   const st = state.ui.studio;
-  if (!st.streaming) return;
-  const dev = state.devices.find((d) => d.kind === "keyboard") || currentDevice();
+  const hadServer = Boolean(st.serverStatus?.running);
+  const hadStream = Boolean(st.streaming);
+  if (!hadStream && !hadServer) return;
+  const dev = keyboardDevice() || currentDevice();
   st.streaming = false;
   st.streamFps = 0;
-  if (dev && window.rm?.stopDirectRgb) {
+  studioCtrl.stopBackgroundLoop();
+  if (hadServer && window.rm?.stopExternalRgbServer) {
     try {
-      await callApi("stopDirectRgb", dev.id);
-      if (!silent) toast("已恢复板载灯效", "已自动关闭实时 RAM 推流并还原原灯效");
+      st.serverStatus = await callApi("stopExternalRgbServer");
     } catch (_) {}
   }
+  if (hadStream && dev && window.rm?.stopDirectRgb) {
+    try {
+      await callApi("stopDirectRgb", dev.id);
+    } catch (_) {}
+  }
+  await syncStudioSensors();
+  renderRailStreamCard();
+  if (!silent) toast("已恢复板载灯效", "已停止后台灯效推流并还原原灯效");
 }
 
 async function loadPaintGroupFromHw(group, { forceOverwrite = true, silent = false } = {}) {
@@ -658,6 +755,10 @@ async function loadDeviceState(deviceId, showToast = false) {
 async function patchConfig(patch, label) {
   const dev = currentDevice();
   if (!dev) return;
+  // 若用户主动调整键盘原生灯光/Logo 设置，先自动退出后台 RAM 推流使新灯效立即生效
+  if (dev.kind === "keyboard" && (patch.light || patch.logo) && (state.ui.studio.streaming || state.ui.studio.serverStatus?.running)) {
+    await stopStudioStreamingIfNeeded(true);
+  }
   state.busy = true;
   setSyncText("写入硬件...", "is-busy");
   try {
@@ -705,17 +806,14 @@ function bindEvents() {
   $("#win-max").addEventListener("click", () => window.rm?.win.toggleMax());
   $("#win-close").addEventListener("click", () => window.rm?.win.close());
 
-  // 顶部导航
+  // 顶部导航（允许后台持续推流，切页绝不中断实时 RAM 推流）
   $("#nav-tabs").addEventListener("click", async (e) => {
     const btn = e.target.closest("[data-tab]");
     if (!btn) return;
     const prevTab = state.tab;
     state.tab = btn.dataset.tab;
     state.ui.capturingKey = false;
-    if (prevTab === "studio" && state.tab !== "studio") {
-      await stopStudioStreamingIfNeeded(false);
-      await syncStudioSensors();
-    } else if (state.tab === "studio" && prevTab !== "studio") {
+    if (prevTab !== state.tab && (prevTab === "studio" || state.tab === "studio")) {
       syncStudioSensors();
     }
     if (state.tab === "keymap" && state.ui.selectedSlot === null) {
@@ -725,14 +823,10 @@ function bindEvents() {
     renderAll();
   });
 
-  // 左侧设备切换与重扫
+  // 左侧设备切换与重扫（切换至鼠标时键盘灯效推流依然在后台平滑运行）
   $("#device-list").addEventListener("click", async (e) => {
     const item = e.target.closest("[data-device-id]");
     if (!item || item.dataset.deviceId === state.activeId) return;
-    if (state.tab === "studio") {
-      await stopStudioStreamingIfNeeded(false);
-      await syncStudioSensors();
-    }
     state.activeId = item.dataset.deviceId;
     state.ui.selectedSlot = null;
     state.ui.keyCategory = null;
@@ -741,9 +835,33 @@ function bindEvents() {
     renderAll();
     if (!state.hwStates.has(state.activeId)) await loadDeviceState(state.activeId);
     else syncStatusForHw(state.hwStates.get(state.activeId));
+    syncStudioSensors();
     if (state.tab === "keymap") {
       const dev = currentDevice();
       if (dev) selectSlot(dev.kind === "keyboard" ? 0 : 3);
+    }
+  });
+
+  // 左侧边栏后台推流控制卡片（跨页面/跨设备随时一键返回、挂起至托盘或停止推流）
+  $("#rail-stream-card").addEventListener("click", async (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    if (btn.id === "rail-jump-studio") {
+      const kb = keyboardDevice();
+      if (kb) state.activeId = kb.id;
+      state.tab = "studio";
+      renderAll();
+      return;
+    }
+    if (btn.id === "rail-tray-btn") {
+      await hideWindowToTray();
+      return;
+    }
+    if (btn.id === "rail-stop-stream-btn") {
+      await stopStudioStreamingIfNeeded(false);
+      const dev = currentDevice();
+      if (dev) setSyncText("已恢复板载灯效", dev.mock ? "is-mock" : "is-live");
+      renderAll();
     }
   });
 
@@ -1161,11 +1279,13 @@ function bindEvents() {
     if (el.dataset.studioSub) {
       const nextSub = el.dataset.studioSub;
       if (nextSub === st.subMode) return;
-      if ((nextSub === "paint" || nextSub === "api") && st.streaming) {
-        await stopStudioStreamingIfNeeded(false);
-      }
       st.subMode = nextSub;
+      // 推流运行期间在脚本/多图层间切换时无缝热切换推流源，不断流
+      if (st.streaming && (nextSub === "script" || nextSub === "layers")) {
+        st.streamSource = nextSub;
+      }
       await syncStudioSensors();
+      renderDeviceRail();
       renderWorkspace();
       return;
     }
@@ -1200,6 +1320,9 @@ function bindEvents() {
     if (el.id === "studio-paint-write-btn") {
       const dev = currentDevice();
       if (!dev || dev.kind !== "keyboard") return;
+      if (st.streaming || st.serverStatus?.running) {
+        await stopStudioStreamingIfNeeded(true);
+      }
       state.busy = true;
       setSyncText("写入逐键配色...", "is-busy");
       renderDeviceRail();
@@ -1229,6 +1352,7 @@ function bindEvents() {
       st.p3 = preset.p3;
       st.scriptSensors = { ...preset.sensors };
       await syncStudioSensors();
+      renderDeviceRail();
       renderWorkspace();
       return;
     }
@@ -1289,6 +1413,10 @@ function bindEvents() {
       }
       return;
     }
+    if (el.id === "studio-tray-btn") {
+      await hideWindowToTray();
+      return;
+    }
     if (el.id === "studio-stream-btn") {
       const dev = currentDevice();
       if (!dev || dev.kind !== "keyboard") return;
@@ -1296,18 +1424,21 @@ function bindEvents() {
         await stopStudioStreamingIfNeeded(true);
         setSyncText("已恢复板载灯效", dev.mock ? "is-mock" : "is-live");
         toast("已停止实时推流", "键盘已自动还原原有板载灯效");
-        renderWorkspace();
+        renderAll();
       } else {
         try {
           if (st.serverStatus?.running) {
             st.serverStatus = await callApi("stopExternalRgbServer");
           }
+          st.streamSource = st.subMode === "layers" ? "layers" : "script";
           await callApi("startDirectRgb", dev.id, st.includeLogo);
           st.streaming = true;
           st.streamFps = 0;
+          await syncStudioSensors();
+          studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
           setSyncText("RAM 实时推流中", "is-live");
-          toast("已开启实时 RAM 推流", "OP 0x12 + OP 0x28 直写内存 · 零 Flash 损耗");
-          renderWorkspace();
+          toast("已开启实时 RAM 推流", "支持切页、最小化或点击「后台挂起」至托盘持续运行");
+          renderAll();
         } catch (err) {
           toast("开启实时推流失败", err.message, true);
         }
@@ -1320,6 +1451,7 @@ function bindEvents() {
       try {
         if (st.serverStatus?.running) {
           st.serverStatus = await callApi("stopExternalRgbServer");
+          studioCtrl.stopBackgroundLoop();
           setSyncText("已停止外部接口", dev.mock ? "is-mock" : "is-live");
           toast("外部控灯桥已停止", "键盘已恢复原板载灯效");
         } else {
@@ -1328,10 +1460,11 @@ function bindEvents() {
             st.streamFps = 0;
           }
           st.serverStatus = await callApi("startExternalRgbServer", dev.id, st.udpPort, st.httpPort, st.includeLogo);
+          studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
           setSyncText("外部控灯桥运行中", "is-live");
-          toast("本地回环控灯桥已启动", `UDP 127.0.0.1:${st.udpPort} · HTTP/WS 127.0.0.1:${st.httpPort}`);
+          toast("本地回环控灯桥已启动", `UDP 127.0.0.1:${st.udpPort} · 窗口关闭将自动挂起至托盘`);
         }
-        renderWorkspace();
+        renderAll();
       } catch (err) {
         toast("控灯服务操作失败", err.message, true);
       }
@@ -1798,6 +1931,20 @@ async function boot() {
       }
     }
   });
+  window.rm?.onStudioStopped?.(() => {
+    const st = state.ui.studio;
+    st.streaming = false;
+    st.streamFps = 0;
+    if (st.serverStatus) st.serverStatus.running = false;
+    st.telemetry.audio.active = false;
+    st.telemetry.ambilight.active = false;
+    st.telemetry.keys.active = false;
+    studioCtrl.stopBackgroundLoop();
+    const dev = currentDevice();
+    if (dev) setSyncText("已恢复板载灯效", dev.mock ? "is-mock" : "is-live");
+    renderAll();
+    toast("已从托盘停止推流", "键盘已还原原有板载灯效");
+  });
   try {
     state.meta = await callApi("getMeta");
     $("#app-version").textContent = `v${state.meta.version}`;
@@ -1807,6 +1954,7 @@ async function boot() {
     const initTab = params.get("tab");
     const initSub = params.get("sub");
     const initScript = params.get("script");
+    const initStream = params.get("streaming") === "1";
     if (initTab && TABS.some((t) => t.id === initTab)) state.tab = initTab;
     if (initSub && ["paint", "script", "layers", "api"].includes(initSub)) {
       state.ui.studio.subMode = initSub;
@@ -1827,9 +1975,20 @@ async function boot() {
       : (state.devices[0]?.id || null);
     renderAll();
     if (state.activeId) await loadDeviceState(state.activeId);
-    if (state.tab === "studio") {
+    if (initStream) {
+      const kb = keyboardDevice();
+      if (kb) {
+        try {
+          state.ui.studio.streamSource = state.ui.studio.subMode === "layers" ? "layers" : "script";
+          await callApi("startDirectRgb", kb.id, state.ui.studio.includeLogo);
+          state.ui.studio.streaming = true;
+          studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
+        } catch (_) {}
+      }
+    }
+    if (state.tab === "studio" || initStream) {
       await syncStudioSensors();
-      renderWorkspace();
+      renderAll();
     }
     // 后台预拉其余在线设备电量，左侧栏立即可见
     for (const d of state.devices) {

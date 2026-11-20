@@ -5,6 +5,15 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-20
+
+### Added
+- **Background-suspended RGB streaming & Windows System Tray**:
+  - **Native Windows System Tray (`tray-icon`)**: Left-click/double-click restores the main window; right-click menu provides `打开 REDMAGIC Control`, `停止灯效推流（恢复板载）`, and `退出程序`. Re-launching the executable also un-hides and focuses a tray-suspended window.
+  - **Smart close-to-tray when streaming**: Clicking the window close button (`×`) while real-time RAM streaming or the local UDP/HTTP/WebSocket bridge is active automatically suspends the app to the system tray instead of stopping your lighting; when idle, closing exits immediately.
+  - **Zero-throttle background push loop**: Passed WebView2 `--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows` flags and decoupled the persistent background hardware push timer from the foreground `requestAnimationFrame` DOM preview loop, maintaining steady `30 FPS` (USB wired) / `8 FPS` (2.4G) streaming even when switching tabs/devices, minimizing, gaming fullscreen, or suspended in the tray.
+  - **Global sidebar streaming status card + one-click `后台挂起`**: Added a live glowing status card in the left rail visible across all tabs and devices (jump back to Studio, suspend to tray, or stop streaming in one click) plus a dedicated `后台挂起` button on the Studio control bar. Manually modifying onboard keyboard lighting automatically stops background streaming to avoid conflicts.
+
 ## [0.4.0] - 2026-11-20
 
 ### Added

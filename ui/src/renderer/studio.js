@@ -274,6 +274,7 @@ export function createInitialStudioState() {
     },
     // 4. 实时推流与硬件控制
     streaming: false,
+    streamSource: "script", // "script" | "layers"（后台推流源，切换页面/托盘挂起时持续驱动）
     includeLogo: true,
     brightness: 1.0,
     streamFps: 0,
@@ -315,16 +316,21 @@ while True:
 # 3) WebSocket: ws://127.0.0.1:${httpPort}/ws`;
 }
 
-/* ---- 实时 60FPS 预览 + 非阻塞真机 RAM 推流调度器 ---- */
+/* ---- 实时 60FPS 预览 + 后台持久非阻塞真机 RAM 推流调度器 ---- */
 export class StudioController {
   constructor() {
     this.rafId = null;
+    this.bgTimer = null;
     this.root = null;
     this.getState = null;
+    this.bgGetState = null;
+    this.bgOnStats = null;
     this.compiledFn = null;
     this.compiledSrc = "";
     this.keysBuf = new Uint8Array(126 * 3);
     this.logoBuf = new Uint8Array(LOGO_LED_COUNT * 3);
+    this.streamKeysBuf = new Uint8Array(126 * 3);
+    this.streamLogoBuf = new Uint8Array(LOGO_LED_COUNT * 3);
     this.lastPushTs = 0;
     this.pushInFlight = false;
     this.lastTelemTs = 0;
@@ -370,6 +376,7 @@ export class StudioController {
     this.tick();
   }
 
+  // 仅分离 DOM 预览循环，绝不中断正在后台运行的真机 RAM 推流定时器
   detach() {
     if (this.rafId) {
       cancelAnimationFrame(this.rafId);
@@ -378,6 +385,22 @@ export class StudioController {
     this.root = null;
     this.ledNodes = [];
     this.logoNodes = [];
+  }
+
+  // 后台独立定时器（16ms 节拍避免与 32ms 门限混叠）：在切页、切设备、最小化或托盘挂起时持续 30 FPS / 8 FPS 稳帧推流
+  ensureBackgroundLoop(getState, onStatsUpdate) {
+    this.bgGetState = getState;
+    this.bgOnStats = onStatsUpdate;
+    if (this.bgTimer !== null) return;
+    this.bgTimer = setInterval(() => this._backgroundStep(), 16);
+  }
+
+  stopBackgroundLoop() {
+    if (this.bgTimer !== null) {
+      clearInterval(this.bgTimer);
+      this.bgTimer = null;
+    }
+    this.fpsCount = 0;
   }
 
   _makeContext(studio, pressedSet) {
@@ -424,7 +447,7 @@ export class StudioController {
     };
   }
 
-  _computeLayersFrame(studio, t, pressedSet) {
+  _computeLayersFrame(studio, t, pressedSet, keysOut, logoOut) {
     const L = studio.layers;
     const telem = studio.telemetry;
     const cA = hexToRgb(L.gradient.colorA);
@@ -507,63 +530,59 @@ export class StudioController {
       return [clamp(r, 0, 255), clamp(g, 0, 255), clamp(b, 0, 255)];
     };
 
-    this.keysBuf.fill(0);
+    keysOut.fill(0);
     for (let i = 0; i < STUDIO_KEYS.length; i++) {
       const k = STUDIO_KEYS[i];
       const [r, g, b] = evalPoint(k.x, k.y, k.slot, false, 0);
       const o = k.slot * 3;
-      this.keysBuf[o] = r;
-      this.keysBuf[o + 1] = g;
-      this.keysBuf[o + 2] = b;
+      keysOut[o] = r;
+      keysOut[o + 1] = g;
+      keysOut[o + 2] = b;
     }
     for (let li = 0; li < LOGO_LED_COUNT; li++) {
       const [r, g, b] = evalPoint(li / (LOGO_LED_COUNT - 1), 0, -1, true, li);
-      this.logoBuf[li * 3] = r;
-      this.logoBuf[li * 3 + 1] = g;
-      this.logoBuf[li * 3 + 2] = b;
+      logoOut[li * 3] = r;
+      logoOut[li * 3 + 1] = g;
+      logoOut[li * 3 + 2] = b;
     }
   }
 
-  _computeFrame(studio, t) {
-    const mode = studio.subMode;
+  _computeFrame(studio, t, mode = studio.subMode, keysOut = this.keysBuf, logoOut = this.logoBuf) {
     const bri = clamp(studio.brightness ?? 1, 0.05, 1);
 
     if (mode === "paint") {
-      this.keysBuf.set(studio.paintRgb);
-      // 涂色模式下 Logo 条展示柔和红魔呼吸预览
+      keysOut.set(studio.paintRgb);
       const [pr, pg, pb] = hexToRgb(studio.paintColor);
       for (let i = 0; i < LOGO_LED_COUNT; i++) {
-        this.logoBuf[i * 3] = Math.round(pr * 0.65);
-        this.logoBuf[i * 3 + 1] = Math.round(pg * 0.65);
-        this.logoBuf[i * 3 + 2] = Math.round(pb * 0.65);
+        logoOut[i * 3] = Math.round(pr * 0.65);
+        logoOut[i * 3 + 1] = Math.round(pg * 0.65);
+        logoOut[i * 3 + 2] = Math.round(pb * 0.65);
       }
       return;
     }
 
     if (mode === "api") {
       if (studio.telemetry.externalKeys?.length >= 378) {
-        for (let i = 0; i < 378; i++) this.keysBuf[i] = studio.telemetry.externalKeys[i];
+        for (let i = 0; i < 378; i++) keysOut[i] = studio.telemetry.externalKeys[i];
       } else {
-        this.keysBuf.fill(0);
-        // 待机呼吸等待外部数据
+        keysOut.fill(0);
         const v = Math.round((0.18 + 0.14 * Math.sin(t * 2.5)) * 255);
         for (const k of STUDIO_KEYS) {
-          this.keysBuf[k.slot * 3] = v;
-          this.keysBuf[k.slot * 3 + 1] = Math.round(v * 0.22);
-          this.keysBuf[k.slot * 3 + 2] = Math.round(v * 0.35);
+          keysOut[k.slot * 3] = v;
+          keysOut[k.slot * 3 + 1] = Math.round(v * 0.22);
+          keysOut[k.slot * 3 + 2] = Math.round(v * 0.35);
         }
       }
       if (studio.telemetry.externalLogo?.length >= 60) {
-        for (let i = 0; i < 60; i++) this.logoBuf[i] = studio.telemetry.externalLogo[i];
+        for (let i = 0; i < 60; i++) logoOut[i] = studio.telemetry.externalLogo[i];
       }
       return;
     }
 
     const pressedSet = new Set(studio.telemetry.keys?.pressedSlots || []);
     if (mode === "layers") {
-      this._computeLayersFrame(studio, t, pressedSet);
+      this._computeLayersFrame(studio, t, pressedSet, keysOut, logoOut);
     } else {
-      // JS Shader 模式
       const comp = this.compileScript(studio.scriptCode);
       if (!comp.ok) {
         studio.scriptError = comp.error;
@@ -572,7 +591,7 @@ export class StudioController {
       studio.scriptError = "";
       const fn = comp.fn;
       const ctx = this._makeContext(studio, pressedSet);
-      this.keysBuf.fill(0);
+      keysOut.fill(0);
       try {
         for (let i = 0; i < STUDIO_KEYS.length; i++) {
           const k = STUDIO_KEYS[i];
@@ -582,9 +601,9 @@ export class StudioController {
           ctx.logoIndex = 0;
           const out = fn(k.x, k.y, t, ctx);
           const o = k.slot * 3;
-          this.keysBuf[o] = clamp(Math.round(out[0] || 0), 0, 255);
-          this.keysBuf[o + 1] = clamp(Math.round(out[1] || 0), 0, 255);
-          this.keysBuf[o + 2] = clamp(Math.round(out[2] || 0), 0, 255);
+          keysOut[o] = clamp(Math.round(out[0] || 0), 0, 255);
+          keysOut[o + 1] = clamp(Math.round(out[1] || 0), 0, 255);
+          keysOut[o + 2] = clamp(Math.round(out[2] || 0), 0, 255);
         }
         for (let li = 0; li < LOGO_LED_COUNT; li++) {
           ctx.slot = -1;
@@ -592,9 +611,9 @@ export class StudioController {
           ctx.isLogo = true;
           ctx.logoIndex = li;
           const out = fn(li / (LOGO_LED_COUNT - 1), 0, t, ctx);
-          this.logoBuf[li * 3] = clamp(Math.round(out[0] || 0), 0, 255);
-          this.logoBuf[li * 3 + 1] = clamp(Math.round(out[1] || 0), 0, 255);
-          this.logoBuf[li * 3 + 2] = clamp(Math.round(out[2] || 0), 0, 255);
+          logoOut[li * 3] = clamp(Math.round(out[0] || 0), 0, 255);
+          logoOut[li * 3 + 1] = clamp(Math.round(out[1] || 0), 0, 255);
+          logoOut[li * 3 + 2] = clamp(Math.round(out[2] || 0), 0, 255);
         }
       } catch (err) {
         studio.scriptError = `运行时错误: ${err?.message || err}`;
@@ -604,11 +623,11 @@ export class StudioController {
 
     // 主亮度系数缩放
     if (bri < 0.999) {
-      for (let i = 0; i < this.keysBuf.length; i++) {
-        this.keysBuf[i] = Math.round(this.keysBuf[i] * bri);
+      for (let i = 0; i < keysOut.length; i++) {
+        keysOut[i] = Math.round(keysOut[i] * bri);
       }
-      for (let i = 0; i < this.logoBuf.length; i++) {
-        this.logoBuf[i] = Math.round(this.logoBuf[i] * bri);
+      for (let i = 0; i < logoOut.length; i++) {
+        logoOut[i] = Math.round(logoOut[i] * bri);
       }
     }
   }
@@ -643,13 +662,7 @@ export class StudioController {
     }
   }
 
-  tick() {
-    if (!this.root || !this.getState) return;
-    const now = performance.now();
-    const { studio, dev, hw } = this.getState();
-    if (!studio || !dev) return;
-
-    // 1. 按需异步拉取 Rust 传感器遥测（~25Hz，仅传感器或外部服务开启时触发）
+  _pollTelemetryIfNeeded(studio, now, onStats) {
     const needTelem =
       studio.subMode === "api" ||
       studio.serverStatus?.running ||
@@ -670,48 +683,72 @@ export class StudioController {
           studio.telemetry.externalKeys = res.data.externalKeys || null;
           studio.telemetry.externalLogo = res.data.externalLogo || null;
           if (res.data.server) studio.serverStatus = res.data.server;
-          this.onStatsUpdate?.(studio);
+          onStats?.(studio);
         }
       }).catch(() => {}).finally(() => {
         this.telemInFlight = false;
       });
     }
+  }
 
-    // 2. 计算当前帧 RGB 并绘制 60fps DOM 预览
-    const t = (now - this.t0) / 1000;
-    this._computeFrame(studio, t);
-    this._paintDom();
-
-    // 3. 若开启实时推流（且不是由外部 API 后端直推），按链路速率推送到真机 RAM (OP 0x12 / 0x28)
+  _pushFrameToHw(studio, dev, hw, now, onStats) {
+    if (!studio.streaming || studio.serverStatus?.running || !dev || !window.rm?.streamRgbFrame) return;
     const is24g = (hw?.connectionMode || dev.connectionMode) === "2.4g";
-    const intervalMs = is24g ? 125 : 33; // 有线 30 FPS / 2.4G 8 FPS
-    if (
-      studio.streaming &&
-      studio.subMode !== "paint" &&
-      studio.subMode !== "api" &&
-      !studio.serverStatus?.running &&
-      !this.pushInFlight &&
-      now - this.lastPushTs >= intervalMs &&
-      window.rm?.streamRgbFrame
-    ) {
-      this.pushInFlight = true;
-      this.lastPushTs = now;
-      const keysArr = Array.from(this.keysBuf);
-      const logoArr = studio.includeLogo ? Array.from(this.logoBuf) : null;
-      window.rm.streamRgbFrame(dev.id, keysArr, logoArr).then((res) => {
-        if (res?.ok) {
-          this.fpsCount += 1;
-          const elapsed = (performance.now() - this.fpsWindowStart) / 1000;
-          if (elapsed >= 0.6) {
-            studio.streamFps = Math.round((this.fpsCount / elapsed) * 10) / 10;
-            this.fpsCount = 0;
-            this.fpsWindowStart = performance.now();
-            this.onStatsUpdate?.(studio);
-          }
+    const intervalMs = is24g ? 124 : 31; // 有线 ~30 FPS / 2.4G ~8 FPS（与 16ms 节拍对齐不混叠）
+    if (this.pushInFlight || now - this.lastPushTs < intervalMs) return;
+
+    this.pushInFlight = true;
+    this.lastPushTs = now;
+    const srcMode = studio.streamSource === "layers" ? "layers" : "script";
+    const t = (now - this.t0) / 1000;
+    this._computeFrame(studio, t, srcMode, this.streamKeysBuf, this.streamLogoBuf);
+
+    const keysArr = Array.from(this.streamKeysBuf);
+    const logoArr = studio.includeLogo ? Array.from(this.streamLogoBuf) : null;
+    window.rm.streamRgbFrame(dev.id, keysArr, logoArr).then((res) => {
+      if (res?.ok) {
+        this.fpsCount += 1;
+        const elapsed = (performance.now() - this.fpsWindowStart) / 1000;
+        if (elapsed >= 0.6) {
+          studio.streamFps = Math.round((this.fpsCount / elapsed) * 10) / 10;
+          this.fpsCount = 0;
+          this.fpsWindowStart = performance.now();
+          onStats?.(studio);
         }
-      }).catch(() => {}).finally(() => {
-        this.pushInFlight = false;
-      });
+      }
+    }).catch(() => {}).finally(() => {
+      this.pushInFlight = false;
+    });
+  }
+
+  // 独立后台循环：切页、切至鼠标、最小化或托盘挂起后仍持续稳帧推流（不触发 DOM 绘制）
+  _backgroundStep() {
+    if (!this.bgGetState) return;
+    const { studio, dev, hw } = this.bgGetState();
+    if (!studio) return;
+    if (!studio.streaming && !studio.serverStatus?.running) {
+      this.stopBackgroundLoop();
+      return;
+    }
+    const now = performance.now();
+    this._pollTelemetryIfNeeded(studio, now, this.bgOnStats);
+    if (studio.streaming && !studio.serverStatus?.running && dev) {
+      this._pushFrameToHw(studio, dev, hw, now, this.bgOnStats);
+    }
+  }
+
+  // 前台 60fps 舞台预览循环（仅在灯效编程页且窗口可见时运行）
+  tick() {
+    if (!this.root || !this.getState) return;
+    const now = performance.now();
+    const { studio, dev } = this.getState();
+    if (!studio || !dev) return;
+
+    if (!document.hidden) {
+      this._pollTelemetryIfNeeded(studio, now, this.onStatsUpdate);
+      const t = (now - this.t0) / 1000;
+      this._computeFrame(studio, t, studio.subMode, this.keysBuf, this.logoBuf);
+      this._paintDom();
     }
 
     this.rafId = requestAnimationFrame(() => this.tick());

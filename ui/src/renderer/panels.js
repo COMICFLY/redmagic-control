@@ -888,20 +888,24 @@ export function renderStudio(device, hwState, ui) {
           <strong>${running ? `本地接口运行中 · 已收 ${st.serverStatus.packets || 0} 帧` : "本地回环控灯桥未启动"}</strong>
           <span class="mono">UDP 127.0.0.1:${st.udpPort} · HTTP/WS 127.0.0.1:${st.httpPort}</span>
         </div>
-        <button type="button" class="btn ${running ? "btn-danger" : "btn-primary"} btn-sm" id="studio-server-toggle-btn" ${readOnly ? "disabled" : ""}>
-          ${running ? `${icon("stop", 13)}停止服务` : `${icon("play", 13)}启动本地服务`}
-        </button>
+        <div class="card-actions">
+          ${running ? `<button type="button" class="btn btn-secondary btn-sm" id="studio-tray-btn" title="隐藏到 Windows 系统托盘继续后台运行">${icon("minus", 13)}后台挂起</button>` : ""}
+          <button type="button" class="btn ${running ? "btn-danger" : "btn-primary"} btn-sm" id="studio-server-toggle-btn" ${readOnly ? "disabled" : ""}>
+            ${running ? `${icon("stop", 13)}停止服务` : `${icon("play", 13)}启动本地服务`}
+          </button>
+        </div>
       </div>`;
   } else {
     leftFootHtml = `
       <div class="studio-stream-bar">
         <div class="studio-stream-left">
           <button type="button" class="btn ${st.streaming ? "btn-danger" : "btn-primary"} btn-sm" id="studio-stream-btn" ${readOnly ? "disabled" : ""}>
-            ${st.streaming ? `${icon("stop", 13)}停止推流并恢复原灯效` : `${icon("play", 13)}开始实时推流到真机`}
+            ${st.streaming ? `${icon("stop", 13)}停止推流` : `${icon("play", 13)}开始实时推流到真机`}
           </button>
+          ${st.streaming ? `<button type="button" class="btn btn-secondary btn-sm" id="studio-tray-btn" title="最小化到系统托盘继续 30FPS 推流（点关闭按钮也会自动挂起）">${icon("minus", 13)}后台挂起</button>` : ""}
           <label class="studio-check">
             <input type="checkbox" id="studio-logo-sync"${st.includeLogo ? " checked" : ""} />
-            <span>同步 Logo 20 灯</span>
+            <span>Logo 20 灯</span>
           </label>
         </div>
         <div class="studio-bri-ctrl">

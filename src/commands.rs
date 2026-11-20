@@ -390,6 +390,12 @@ pub async fn studio_server_stop(state: State<'_, AppState>) -> Result<Value, Str
 }
 
 #[tauri::command]
+pub fn app_hide_to_tray(window: tauri::WebviewWindow) -> Result<Value, String> {
+    window.hide().map_err(|e| format!("隐藏到系统托盘失败: {e}"))?;
+    Ok(json!({ "ok": true }))
+}
+
+#[tauri::command]
 pub async fn studio_export_preset(name: String, content: String) -> Result<Value, String> {
     tokio::task::spawn_blocking(move || {
         let default_name = if name.trim().is_empty() {

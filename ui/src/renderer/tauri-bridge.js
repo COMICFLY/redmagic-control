@@ -69,8 +69,11 @@
     stopExternalRgbServer: () => safeInvoke("studio_server_stop"),
     exportStudioPreset: (name, content) => safeInvoke("studio_export_preset", { name, content }),
     importStudioPreset: () => safeInvoke("studio_import_preset"),
+    hideToTray: () => safeInvoke("app_hide_to_tray"),
     onScreenProgress: (cb) => bindEvent("screen:progress", cb),
     onDeviceEvent: (cb) => bindEvent("device:event", cb),
+    onStudioStopped: (cb) => bindEvent("studio:stopped", cb),
+    onTrayHidden: (cb) => bindEvent("studio:tray-hidden", cb),
     win: {
       minimize: () => getCurrentWindow && getCurrentWindow().minimize(),
       toggleMax: async () => {

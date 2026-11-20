@@ -890,6 +890,26 @@ impl DeviceManager {
             .unwrap_or(false)
     }
 
+    pub fn has_any_direct_rgb(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|i| !i.saved_direct_light.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn stop_all_direct_rgb(&self) {
+        self.rgb_streaming.store(false, Ordering::SeqCst);
+        if let Ok(mut inner) = self.inner.lock() {
+            let saved_list: Vec<(String, SavedDirectLightState)> =
+                inner.saved_direct_light.drain().collect();
+            for (dev_id, saved) in saved_list {
+                if let Some(DeviceSession::Keyboard(kb)) = inner.sessions.get_mut(&dev_id) {
+                    let _ = kb.exit_direct_rgb(saved);
+                }
+            }
+        }
+    }
+
     pub fn close_all_sessions(&self) {
         self.monitor_stop.store(true, Ordering::SeqCst);
         self.rgb_streaming.store(false, Ordering::SeqCst);
@@ -1150,5 +1170,13 @@ mod tests {
         assert_eq!(stop_dir["ok"], true);
         assert_eq!(stop_dir["config"]["light"]["mode"], 18);
         assert!(!mgr.is_direct_rgb_active("kb-1s"));
+
+        // 6. 托盘一键停止所有后台推流并恢复原板载灯效
+        mgr.start_direct_rgb("kb-1s", true).unwrap();
+        assert!(mgr.has_any_direct_rgb());
+        mgr.stop_all_direct_rgb();
+        assert!(!mgr.has_any_direct_rgb());
+        let after_tray = mgr.read_state("kb-1s").unwrap();
+        assert_eq!(after_tray["config"]["light"]["mode"], 18);
     }
 }
