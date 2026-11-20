@@ -5,6 +5,12 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-20
+
+### Changed
+- **Zero-scroll single-viewport layout at `1280×820`**: Reflowed keyboard Keymap (`按键映射`) with a balanced `780px` stage cap and side-by-side physical key capture + preset selector (`km-picker-grid`), compacted Mini-Screen (`小屏图片`) cropper bezel/toolbar (`396px`) and preview proportions, and added bounded internal scroll to multi-link list in Hardware Diagnostics (`硬件诊断`), so all 9 views fit cleanly without page scrollbars while remaining freely resizable.
+- **Documentation & dev preview**: Added `?device=...&tab=...` (`REDMAGIC_VIEW`) initial view routing and embedded updated frosted-glass showcase screenshots in `README.md`.
+
 ## [0.3.0] - 2026-11-20
 
 ### Added

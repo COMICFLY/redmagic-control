@@ -1,6 +1,6 @@
 [package]
 name = "redmagic-control"
-version = "0.3.0"
+version = "0.3.1"
 description = "REDMAGIC 外设控制中心 — 纯 Rust + Tauri v2 轻量驱动 (GK001S / GS001S)"
 edition = "2021"
 

@@ -406,15 +406,26 @@ export function renderKeymap(device, hwState, meta, ui) {
     const opts = KEY_PRESETS.map(([hex, label]) =>
       `<option value="${hex}"${pendingHex === hex ? " selected" : ""}>${esc(label)} (0x${hex})</option>`
     ).join("");
-    pickerHtml = `
-      <div class="stack-sm">
-        <button type="button" class="capture-btn${ui.capturingKey ? " is-listening" : ""}" id="capture-key-btn">
-          ${icon("command", 15)}
-          <span>${ui.capturingKey ? "请按下键盘上的目标按键…" : "点击后按物理按键快速录入"}</span>
-        </button>
-        <label class="field-label" for="key-preset-select">或从标准键表选择</label>
-        <select class="select mono" id="key-preset-select">${opts}</select>
-      </div>`;
+    if (device.kind === "keyboard") {
+      pickerHtml = `
+        <div class="km-picker-grid">
+          <button type="button" class="capture-btn is-compact${ui.capturingKey ? " is-listening" : ""}" id="capture-key-btn">
+            ${icon("command", 14)}
+            <span>${ui.capturingKey ? "请按物理按键…" : "点击后按物理键录入"}</span>
+          </button>
+          <select class="select mono" id="key-preset-select" aria-label="从标准键表选择">${opts}</select>
+        </div>`;
+    } else {
+      pickerHtml = `
+        <div class="stack-sm">
+          <button type="button" class="capture-btn${ui.capturingKey ? " is-listening" : ""}" id="capture-key-btn">
+            ${icon("command", 15)}
+            <span>${ui.capturingKey ? "请按下键盘上的目标按键…" : "点击后按物理按键快速录入"}</span>
+          </button>
+          <label class="field-label" for="key-preset-select">或从标准键表选择</label>
+          <select class="select mono" id="key-preset-select">${opts}</select>
+        </div>`;
+    }
   } else if (category === "mouse") {
     const opts = MOUSE_PRESETS.map(([hex, label]) =>
       `<option value="${hex}"${pendingHex === hex ? " selected" : ""}>${esc(label)}</option>`
