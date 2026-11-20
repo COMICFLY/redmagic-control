@@ -5,6 +5,15 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-11-20
+
+### Fixed & Optimized
+- **Eliminated abnormal background CPU (13.6% → <0.3%) & RAM (312 MB → ~15 MB) when suspended to tray**:
+  - **Pure-Rust Native RGB Runner (`src/studio/runner.rs`)**: Implemented all 6 built-in presets (`aurora`, `radar`, `ripple`, `spectrum`, `ambilight`, `matrix`) and the 4-layer compositor directly in zero-allocation Rust threads feeding HID `OP 0x12 + OP 0x28` at `30 FPS` (USB wired) / `8 FPS` (2.4G) with zero per-frame JS IPC overhead.
+  - **Zero-WebView2 headless tray suspension**: When suspending to tray (via `后台挂起` or window close) while using any built-in preset, multi-layer mode, or external UDP/HTTP/WS bridge, the WebView2 window is now **completely destroyed** (`win.destroy()`), releasing all 6 Chromium WebView2 processes (~312 MB RAM and 11.6% GPU CPU). Clicking the tray icon or relaunching the app (signaled via Win32 Named Event `Local\REDMAGIC_Control_RS_WakeEvent`) recreates the UI on demand and seamlessly restores the live streaming state via `studio_status`.
+  - **Zero-GPU hidden mode for custom JS shaders**: Removed `--disable-backgrounding-occluded-windows` (which previously forced WebView2 GPU process to composite 60 FPS frosted-glass blur onto invisible windows), added explicit `ICoreWebView2Controller::SetIsVisible(false)` + `visibilitychange`/`studio:tray-hidden` hooks to halt all `rAF` loops and CSS animations immediately.
+  - **Foreground GPU optimization**: Isolated `.stage-kb-crop` / `.kb-led-layer` with `contain: layout style paint; transform: translateZ(0)` and matched foreground Studio preview cadence to `30 FPS`.
+
 ## [0.4.1] - 2026-11-20
 
 ### Added

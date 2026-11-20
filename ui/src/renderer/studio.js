@@ -274,7 +274,8 @@ export function createInitialStudioState() {
     },
     // 4. 实时推流与硬件控制
     streaming: false,
-    streamSource: "script", // "script" | "layers"（后台推流源，切换页面/托盘挂起时持续驱动）
+    nativeStreaming: false, // true = 纯 Rust 零 WebView2 后台引擎接管；false = 自定义 JS 脚本逐帧推流
+    streamSource: "script", // "script" | "layers"
     includeLogo: true,
     brightness: 1.0,
     streamFps: 0,
@@ -289,6 +290,32 @@ export function createInitialStudioState() {
       keys: { active: false, pressedSlots: [], pulses: [] },
       externalKeys: null,
       externalLogo: null,
+    },
+  };
+}
+
+export function isNativeEligible(studio) {
+  if (!studio) return false;
+  if (studio.streamSource === "layers") return true;
+  const preset = STUDIO_SCRIPTS.find((s) => s.id === studio.scriptId);
+  if (!preset) return false;
+  return String(studio.scriptCode || "").trim() === preset.code.trim();
+}
+
+export function buildNativeConfig(studio) {
+  return {
+    mode: studio.streamSource === "layers" ? "layers" : "preset",
+    presetId: studio.scriptId || "aurora",
+    p1: Number(studio.p1 ?? 0.5),
+    p2: Number(studio.p2 ?? 0.5),
+    p3: Number(studio.p3 ?? 0.5),
+    brightness: Number(studio.brightness ?? 1.0),
+    includeLogo: Boolean(studio.includeLogo),
+    layers: {
+      gradient: { ...studio.layers.gradient },
+      audio: { ...studio.layers.audio },
+      ambilight: { ...studio.layers.ambilight },
+      typing: { ...studio.layers.typing },
     },
   };
 }
@@ -335,6 +362,7 @@ export class StudioController {
     this.pushInFlight = false;
     this.lastTelemTs = 0;
     this.telemInFlight = false;
+    this.lastPreviewTs = 0;
     this.fpsCount = 0;
     this.fpsWindowStart = performance.now();
     this.t0 = performance.now();
@@ -662,17 +690,18 @@ export class StudioController {
     }
   }
 
-  _pollTelemetryIfNeeded(studio, now, onStats) {
+  _pollTelemetryIfNeeded(studio, now, onStats, minIntervalMs = 45) {
     const needTelem =
       studio.subMode === "api" ||
       studio.serverStatus?.running ||
+      studio.nativeStreaming ||
       studio.telemetry.audio?.active ||
       studio.telemetry.ambilight?.active ||
       studio.telemetry.keys?.active ||
       (studio.subMode === "layers" && (studio.layers.audio.enabled || studio.layers.ambilight.enabled || studio.layers.typing.enabled)) ||
       (studio.subMode === "script" && (studio.scriptId === "spectrum" || studio.scriptId === "ambilight" || studio.scriptId === "ripple"));
 
-    if (needTelem && !this.telemInFlight && now - this.lastTelemTs >= 38 && window.rm?.pollStudioTelemetry) {
+    if (needTelem && !this.telemInFlight && now - this.lastTelemTs >= minIntervalMs && window.rm?.pollStudioTelemetry) {
       this.telemInFlight = true;
       this.lastTelemTs = now;
       window.rm.pollStudioTelemetry().then((res) => {
@@ -683,6 +712,9 @@ export class StudioController {
           studio.telemetry.externalKeys = res.data.externalKeys || null;
           studio.telemetry.externalLogo = res.data.externalLogo || null;
           if (res.data.server) studio.serverStatus = res.data.server;
+          if (studio.nativeStreaming && res.data.native) {
+            studio.streamFps = res.data.native.fps || studio.streamFps;
+          }
           onStats?.(studio);
         }
       }).catch(() => {}).finally(() => {
@@ -692,7 +724,8 @@ export class StudioController {
   }
 
   _pushFrameToHw(studio, dev, hw, now, onStats) {
-    if (!studio.streaming || studio.serverStatus?.running || !dev || !window.rm?.streamRgbFrame) return;
+    // 纯 Rust 原生引擎或外部 API 运行时，由 Rust 线程直接写入 HID，前端零逐帧 IPC
+    if (!studio.streaming || studio.nativeStreaming || studio.serverStatus?.running || !dev || !window.rm?.streamRgbFrame) return;
     const is24g = (hw?.connectionMode || dev.connectionMode) === "2.4g";
     const intervalMs = is24g ? 124 : 31; // 有线 ~30 FPS / 2.4G ~8 FPS（与 16ms 节拍对齐不混叠）
     if (this.pushInFlight || now - this.lastPushTs < intervalMs) return;
@@ -721,7 +754,9 @@ export class StudioController {
     });
   }
 
-  // 独立后台循环：切页、切至鼠标、最小化或托盘挂起后仍持续稳帧推流（不触发 DOM 绘制）
+  // 独立后台循环：
+  // - 纯 Rust 原生推流时仅低频刷新侧边栏 FPS（500ms），0 帧推送开销；
+  // - 手写自定义 JS 脚本推流时在切页/托盘隐藏期间维持 30 FPS / 8 FPS 推送（且零 DOM 绘制）。
   _backgroundStep() {
     if (!this.bgGetState) return;
     const { studio, dev, hw } = this.bgGetState();
@@ -731,26 +766,36 @@ export class StudioController {
       return;
     }
     const now = performance.now();
-    this._pollTelemetryIfNeeded(studio, now, this.bgOnStats);
-    if (studio.streaming && !studio.serverStatus?.running && dev) {
+    const isRustOwned = studio.nativeStreaming || studio.serverStatus?.running;
+    const pollGap = isRustOwned ? (this.root ? 120 : 500) : 45;
+    if (!document.hidden && !document.body.classList.contains("is-tray-hidden")) {
+      this._pollTelemetryIfNeeded(studio, now, this.bgOnStats, pollGap);
+    } else if (!isRustOwned) {
+      // 自定义 JS 在托盘隐藏状态下仍需拉取音频/屏幕/按键传感器数据
+      this._pollTelemetryIfNeeded(studio, now, this.bgOnStats, 45);
+    }
+    if (studio.streaming && !isRustOwned && dev) {
       this._pushFrameToHw(studio, dev, hw, now, this.bgOnStats);
     }
   }
 
-  // 前台 60fps 舞台预览循环（仅在灯效编程页且窗口可见时运行）
+  // 前台 30fps 舞台预览循环（匹配键盘 30FPS 推流速率，避免 60FPS 过度触发毛玻璃 GPU 合成）
   tick() {
     if (!this.root || !this.getState) return;
+    if (document.hidden || document.body.classList.contains("is-tray-hidden")) {
+      this.rafId = null;
+      return;
+    }
     const now = performance.now();
-    const { studio, dev } = this.getState();
-    if (!studio || !dev) return;
-
-    if (!document.hidden) {
-      this._pollTelemetryIfNeeded(studio, now, this.onStatsUpdate);
+    if (now - this.lastPreviewTs >= 32) {
+      this.lastPreviewTs = now;
+      const { studio, dev } = this.getState();
+      if (!studio || !dev) return;
+      this._pollTelemetryIfNeeded(studio, now, this.onStatsUpdate, 50);
       const t = (now - this.t0) / 1000;
       this._computeFrame(studio, t, studio.subMode, this.keysBuf, this.logoBuf);
       this._paintDom();
     }
-
     this.rafId = requestAnimationFrame(() => this.tick());
   }
 }

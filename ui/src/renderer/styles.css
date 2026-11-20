@@ -996,6 +996,8 @@ button {
   aspect-ratio: 680 / 248;
   overflow: hidden;
   border-radius: var(--radius-xs);
+  contain: layout style paint;
+  transform: translateZ(0);
 }
 
 .stage-kb-crop.is-large {
@@ -1013,6 +1015,7 @@ button {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  contain: layout style paint;
 }
 
 .kb-led {
@@ -2616,6 +2619,16 @@ input[type="range"] {
 
 .toast.is-error { border-left-color: var(--status-err); }
 .toast small { display: block; margin-top: 2px; font-size: 12px; color: var(--text-muted); }
+
+/* 托盘隐藏 / 最小化期间彻底停止 GPU 图层与动画合成 */
+body.is-tray-hidden .app-shell {
+  display: none !important;
+}
+
+body.is-tray-hidden * {
+  animation: none !important;
+  transition: none !important;
+}
 
 @media (max-width: 1120px) {
   .workbench, .workbench.is-keymap, .workbench.is-screen, .workbench.is-studio, .keymap-inspector-bar { grid-template-columns: 1fr; }

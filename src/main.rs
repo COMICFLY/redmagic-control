@@ -17,27 +17,38 @@ use studio::StudioEngine;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::window::{Color, Effect, EffectsBuilder};
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 fn install_panic_logger() {
     std::panic::set_hook(Box::new(|info| {
         let log_path = std::env::temp_dir().join("redmagic-control-panic.log");
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path) {
-            let _ = writeln!(f, "[{}] PANIC: {info}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+            let _ = writeln!(
+                f,
+                "[{}] PANIC: {info}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
         }
     }));
 }
 
-/// Windows 单实例互斥锁：重复双击 exe 时直接唤醒已有窗口，防止多实例争抢 WebView2 / HID 句柄
+/// Windows 单实例互斥锁 + 命名唤醒事件：
+/// 即使主窗口在托盘挂起期间已彻底销毁（零 WebView2 进程），重复运行 exe 也能瞬间重建并唤起主界面。
 #[cfg(windows)]
-struct SingleInstanceGuard(windows_sys::Win32::Foundation::HANDLE);
+struct SingleInstanceGuard {
+    mutex: windows_sys::Win32::Foundation::HANDLE,
+    wake_event: windows_sys::Win32::Foundation::HANDLE,
+}
 
 #[cfg(windows)]
 impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {
         unsafe {
-            if !self.0.is_null() {
-                windows_sys::Win32::Foundation::CloseHandle(self.0);
+            if !self.wake_event.is_null() {
+                windows_sys::Win32::Foundation::CloseHandle(self.wake_event);
+            }
+            if !self.mutex.is_null() {
+                windows_sys::Win32::Foundation::CloseHandle(self.mutex);
             }
         }
     }
@@ -49,22 +60,38 @@ fn acquire_single_instance() -> Option<SingleInstanceGuard> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null;
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
-    use windows_sys::Win32::System::Threading::CreateMutexW;
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, CreateMutexW, OpenEventW, SetEvent, EVENT_MODIFY_STATE,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
     };
 
-    let name: Vec<u16> = OsStr::new("Local\\REDMAGIC_Control_RS_SingleInstance")
+    let mutex_name: Vec<u16> = OsStr::new("Local\\REDMAGIC_Control_RS_SingleInstance")
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+    let event_name: Vec<u16> = OsStr::new("Local\\REDMAGIC_Control_RS_WakeEvent")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
     unsafe {
-        let h = CreateMutexW(null(), 0, name.as_ptr());
+        let h = CreateMutexW(null(), 0, mutex_name.as_ptr());
         if h.is_null() {
-            return Some(SingleInstanceGuard(std::ptr::null_mut()));
+            return Some(SingleInstanceGuard {
+                mutex: std::ptr::null_mut(),
+                wake_event: std::ptr::null_mut(),
+            });
         }
         if GetLastError() == ERROR_ALREADY_EXISTS {
             CloseHandle(h);
+            // 优先通过命名事件唤醒常驻托盘进程（支持 WebView2 已销毁的纯 Rust 挂起态）
+            let ev = OpenEventW(EVENT_MODIFY_STATE, 0, event_name.as_ptr());
+            if !ev.is_null() {
+                SetEvent(ev);
+                CloseHandle(ev);
+            }
             let title: Vec<u16> = OsStr::new("REDMAGIC Control")
                 .encode_wide()
                 .chain(std::iter::once(0))
@@ -77,7 +104,11 @@ fn acquire_single_instance() -> Option<SingleInstanceGuard> {
             }
             return None;
         }
-        Some(SingleInstanceGuard(h))
+        let wake_event = CreateEventW(null(), 0, 0, event_name.as_ptr());
+        Some(SingleInstanceGuard {
+            mutex: h,
+            wake_event,
+        })
     }
 }
 
@@ -154,24 +185,33 @@ fn primary_webview_data_dir() -> PathBuf {
         .join("wv2")
 }
 
-fn build_main_window(
-    app: &tauri::App,
+fn build_window_with_dir(
+    app: &AppHandle,
     data_dir: PathBuf,
+    use_env_view: bool,
 ) -> tauri::Result<tauri::WebviewWindow> {
     let effects = EffectsBuilder::new()
         .effect(Effect::Acrylic)
         .color(Color(10, 12, 18, 195))
         .build();
 
-    let entry_url = match std::env::var("REDMAGIC_VIEW") {
-        Ok(q) if !q.trim().is_empty() => format!("index.html?{}", q.trim().trim_start_matches('?')),
-        _ => "index.html".to_string(),
+    let entry_url = if use_env_view {
+        match std::env::var("REDMAGIC_VIEW") {
+            Ok(q) if !q.trim().is_empty() => {
+                format!("index.html?{}", q.trim().trim_start_matches('?'))
+            }
+            _ => "index.html".to_string(),
+        }
+    } else {
+        "index.html".to_string()
     };
 
     let allow_devtools = std::env::var("REDMAGIC_DEVTOOLS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
+    // 仅禁用定时器节流以支持手写自定义 JS 后台推流；绝不加 --disable-backgrounding-occluded-windows，
+    // 防止 Chromium GPU 进程对隐藏/遮挡窗口空跑 60fps 毛玻璃合成！
     WebviewWindowBuilder::new(app, "main", WebviewUrl::App(entry_url.into()))
         .title("REDMAGIC Control")
         .inner_size(1280.0, 820.0)
@@ -183,13 +223,99 @@ fn build_main_window(
         .center()
         .devtools(allow_devtools)
         .zoom_hotkeys_enabled(false)
-        // 禁止 Chromium 在最小化、遮挡或托盘挂起时对定时器降频，确保后台实时推流稳帧 30 FPS
-        .additional_browser_args(
-            "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows",
-        )
+        .additional_browser_args("--disable-background-timer-throttling")
         .effects(effects)
         .data_directory(data_dir)
         .build()
+}
+
+/// 唤起已有主窗口，或在纯 Rust 托盘挂起（WebView2 已彻底销毁释放 ~300MB 内存）后按需重建主窗口
+fn show_or_recreate_main_window(
+    app: &AppHandle,
+    force_mock: bool,
+    use_env_view: bool,
+    mgr: DeviceManager,
+    studio: StudioEngine,
+    force_quit: Arc<AtomicBool>,
+) -> tauri::Result<()> {
+    if let Some(w) = app.get_webview_window("main") {
+        #[cfg(windows)]
+        let _ = w.with_webview(|wv| unsafe {
+            let _ = wv.controller().SetIsVisible(true);
+        });
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        let _ = w.emit("studio:tray-shown", serde_json::json!({ "ok": true }));
+        return Ok(());
+    }
+
+    let win = if force_mock {
+        let mock_dir =
+            std::env::temp_dir().join(format!("redmagic-control-mock-{}", std::process::id()));
+        build_window_with_dir(app, mock_dir, use_env_view)?
+    } else {
+        match build_window_with_dir(app, primary_webview_data_dir(), use_env_view) {
+            Ok(w) => w,
+            Err(_) => {
+                let fallback = std::env::temp_dir()
+                    .join(format!("redmagic-control-wv2-{}", std::process::id()));
+                build_window_with_dir(app, fallback, use_env_view)?
+            }
+        }
+    };
+
+    #[cfg(windows)]
+    if let Ok(hwnd) = win.hwnd() {
+        apply_win11_glass_chrome(hwnd.0 as *mut std::ffi::c_void);
+    }
+
+    #[cfg(windows)]
+    {
+        let allow_devtools = std::env::var("REDMAGIC_DEVTOOLS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let _ = win.with_webview(move |wv| unsafe {
+            if let Ok(core) = wv.controller().CoreWebView2() {
+                if let Ok(settings) = core.Settings() {
+                    let _ = settings.SetAreDefaultContextMenusEnabled(allow_devtools);
+                    let _ = settings.SetAreDevToolsEnabled(allow_devtools);
+                    let _ = settings.SetIsStatusBarEnabled(false);
+                    let _ = settings.SetIsZoomControlEnabled(false);
+                }
+            }
+        });
+    }
+
+    // 推流关闭策略：
+    // 1. 纯 Rust 引擎或外部 API 运行时：直接允许关闭并销毁 WebView2（释放全部 ~300MB RAM 与 GPU 进程），
+    //    进程与托盘继续在后台以 <0.3% CPU / ~15MB 内存稳帧推流；
+    // 2. 手写自定义 JS 推流时：隐藏窗口并 SetIsVisible(false) 关闭 GPU 合成，使 GPU 占用降至 0%。
+    let win_for_close = win.clone();
+    win.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            if force_quit.load(Ordering::SeqCst) {
+                return;
+            }
+            if studio.is_rust_owned_streaming() {
+                // 让 WebView2 窗口正常销毁；RunEvent::ExitRequested 会拦截退出保持托盘常驻
+                return;
+            }
+            if mgr.has_any_direct_rgb() {
+                api.prevent_close();
+                let _ = win_for_close
+                    .emit("studio:tray-hidden", serde_json::json!({ "ok": true }));
+                #[cfg(windows)]
+                let _ = win_for_close.with_webview(|wv| unsafe {
+                    let _ = wv.controller().SetIsVisible(false);
+                });
+                let _ = win_for_close.hide();
+            }
+        }
+    });
+
+    let _ = win.set_focus();
+    Ok(())
 }
 
 fn main() {
@@ -203,7 +329,10 @@ fn main() {
     if args.iter().any(|a| a == "--probe") {
         let mgr = DeviceManager::new(force_mock);
         let devs = mgr.list_devices(true);
-        println!("PROBE_DEVICES={}", serde_json::to_string_pretty(&devs).unwrap());
+        println!(
+            "PROBE_DEVICES={}",
+            serde_json::to_string_pretty(&devs).unwrap()
+        );
         for d in &devs {
             match mgr.read_state(&d.id) {
                 Ok(st) => {
@@ -226,7 +355,7 @@ fn main() {
         return;
     }
 
-    let _single_guard = if force_mock {
+    let single_guard = if force_mock {
         None
     } else {
         match acquire_single_instance() {
@@ -235,18 +364,24 @@ fn main() {
         }
     };
 
+    #[cfg(windows)]
+    let wake_event_raw: usize = single_guard
+        .as_ref()
+        .map(|g| g.wake_event as usize)
+        .unwrap_or(0);
+
     let manager = DeviceManager::new(force_mock);
     let studio = StudioEngine::new();
     let monitor_mgr = manager.clone();
-    let close_mgr = manager.clone();
-    let close_studio = studio.clone();
-    let tray_mgr = manager.clone();
-    let tray_studio = studio.clone();
+    let setup_mgr = manager.clone();
+    let setup_studio = studio.clone();
+    let exit_mgr = manager.clone();
+    let exit_studio = studio.clone();
     let cleanup_mgr = manager.clone();
     let cleanup_studio = studio.clone();
     let force_quit = Arc::new(AtomicBool::new(false));
-    let close_force_quit = force_quit.clone();
-    let tray_force_quit = force_quit.clone();
+    let setup_force_quit = force_quit.clone();
+    let exit_force_quit = force_quit.clone();
     let headless_shot = std::env::var("REDMAGIC_VIEW")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
@@ -254,72 +389,62 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState { manager, studio })
         .setup(move |app| {
-            // 优先使用固定 WebView2 数据目录；Mock 预览或遭遇 0x800700AA（目录被占用）时自动使用独立临时目录避免闪退
-            let win = if force_mock {
-                let mock_dir = std::env::temp_dir()
-                    .join(format!("redmagic-control-mock-{}", std::process::id()));
-                build_main_window(app, mock_dir)?
-            } else {
-                match build_main_window(app, primary_webview_data_dir()) {
-                    Ok(w) => w,
-                    Err(_) => {
-                        let fallback = std::env::temp_dir()
-                            .join(format!("redmagic-control-wv2-{}", std::process::id()));
-                        build_main_window(app, fallback)?
-                    }
-                }
-            };
+            let app_handle = app.handle().clone();
+            show_or_recreate_main_window(
+                &app_handle,
+                force_mock,
+                true,
+                setup_mgr.clone(),
+                setup_studio.clone(),
+                setup_force_quit.clone(),
+            )?;
+
+            // 监听单实例唤醒事件（0% CPU 内核阻塞等待），重复双击 exe 时立即重建/唤起窗口
             #[cfg(windows)]
-            if let Ok(hwnd) = win.hwnd() {
-                apply_win11_glass_chrome(hwnd.0 as *mut std::ffi::c_void);
-            }
-            #[cfg(windows)]
-            {
-                let allow_devtools = std::env::var("REDMAGIC_DEVTOOLS")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
-                let _ = win.with_webview(move |wv| unsafe {
-                    if let Ok(core) = wv.controller().CoreWebView2() {
-                        if let Ok(settings) = core.Settings() {
-                            let _ = settings.SetAreDefaultContextMenusEnabled(allow_devtools);
-                            let _ = settings.SetAreDevToolsEnabled(allow_devtools);
-                            let _ = settings.SetIsStatusBarEnabled(false);
-                            let _ = settings.SetIsZoomControlEnabled(false);
-                        }
+            if wake_event_raw != 0 {
+                let wake_handle = app_handle.clone();
+                let wake_mgr = setup_mgr.clone();
+                let wake_studio = setup_studio.clone();
+                let wake_fq = setup_force_quit.clone();
+                std::thread::spawn(move || unsafe {
+                    use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+                    let ev = wake_event_raw as windows_sys::Win32::Foundation::HANDLE;
+                    while WaitForSingleObject(ev, INFINITE) == 0 {
+                        let h = wake_handle.clone();
+                        let m = wake_mgr.clone();
+                        let s = wake_studio.clone();
+                        let fq = wake_fq.clone();
+                        let _ = wake_handle.run_on_main_thread(move || {
+                            let _ = show_or_recreate_main_window(&h, force_mock, false, m, s, fq);
+                        });
                     }
                 });
             }
-            let _ = win.set_focus();
 
-            // 推流或外部控灯服务运行期间，点击关闭窗口自动挂起至系统托盘继续推流
-            let win_for_close = win.clone();
-            win.on_window_event(move |event| {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    let streaming_now =
-                        close_mgr.has_any_direct_rgb() || close_studio.server.is_running();
-                    if streaming_now && !close_force_quit.load(Ordering::SeqCst) {
-                        api.prevent_close();
-                        let _ = win_for_close.hide();
-                        let _ = win_for_close
-                            .emit("studio:tray-hidden", serde_json::json!({ "ok": true }));
-                    }
-                }
-            });
-
-            // Windows 系统托盘图标与右键菜单（支持后台挂起推流、一键恢复窗口、一键停止推流、彻底退出）
+            // Windows 系统托盘图标与右键菜单（支持纯 Rust 零 WebView2 后台挂起、一键唤起、停止推流与退出）
             if !headless_shot {
-                let show_item = MenuItemBuilder::with_id("show", "打开 REDMAGIC Control").build(app)?;
-                let stop_item = MenuItemBuilder::with_id("stop_stream", "停止灯效推流（恢复板载）").build(app)?;
+                let show_item =
+                    MenuItemBuilder::with_id("show", "打开 REDMAGIC Control").build(app)?;
+                let stop_item =
+                    MenuItemBuilder::with_id("stop_stream", "停止灯效推流（恢复板载）")
+                        .build(app)?;
                 let quit_item = MenuItemBuilder::with_id("quit", "退出程序").build(app)?;
                 let tray_menu = MenuBuilder::new(app)
                     .items(&[&show_item, &stop_item, &quit_item])
                     .build()?;
 
+                let click_mgr = setup_mgr.clone();
+                let click_studio = setup_studio.clone();
+                let click_fq = setup_force_quit.clone();
+                let menu_mgr = setup_mgr.clone();
+                let menu_studio = setup_studio.clone();
+                let menu_fq = setup_force_quit.clone();
+
                 let mut tray_builder = TrayIconBuilder::with_id("main-tray")
-                    .tooltip("REDMAGIC Control — 支持后台挂起灯效推流")
+                    .tooltip("REDMAGIC Control — 轻量纯 Rust 后台灯效引擎")
                     .menu(&tray_menu)
                     .show_menu_on_left_click(false)
-                    .on_tray_icon_event(|tray, event| {
+                    .on_tray_icon_event(move |tray, event| {
                         let restore = matches!(
                             event,
                             TrayIconEvent::Click {
@@ -332,36 +457,42 @@ fn main() {
                             }
                         );
                         if restore {
-                            if let Some(w) = tray.app_handle().get_webview_window("main") {
-                                let _ = w.show();
-                                let _ = w.unminimize();
-                                let _ = w.set_focus();
-                            }
+                            let h = tray.app_handle().clone();
+                            let _ = show_or_recreate_main_window(
+                                &h,
+                                force_mock,
+                                false,
+                                click_mgr.clone(),
+                                click_studio.clone(),
+                                click_fq.clone(),
+                            );
                         }
                     })
                     .on_menu_event(move |app_handle, event| match event.id().as_ref() {
                         "show" => {
-                            if let Some(w) = app_handle.get_webview_window("main") {
-                                let _ = w.show();
-                                let _ = w.unminimize();
-                                let _ = w.set_focus();
-                            }
+                            let _ = show_or_recreate_main_window(
+                                app_handle,
+                                force_mock,
+                                false,
+                                menu_mgr.clone(),
+                                menu_studio.clone(),
+                                menu_fq.clone(),
+                            );
                         }
                         "stop_stream" => {
-                            tray_studio.set_sensors(false, false, false);
-                            if tray_studio.server.is_running() {
-                                tray_studio.server.stop(&tray_mgr);
-                            }
-                            tray_mgr.stop_all_direct_rgb();
+                            menu_studio.runner.stop(&menu_mgr);
+                            menu_studio.server.stop(&menu_mgr);
+                            menu_studio.set_sensors(false, false, false);
+                            menu_mgr.stop_all_direct_rgb();
                             let _ = app_handle.emit(
                                 "studio:stopped",
                                 serde_json::json!({ "source": "tray" }),
                             );
                         }
                         "quit" => {
-                            tray_force_quit.store(true, Ordering::SeqCst);
-                            tray_studio.shutdown(&tray_mgr);
-                            tray_mgr.close_all_sessions();
+                            menu_fq.store(true, Ordering::SeqCst);
+                            menu_studio.shutdown(&menu_mgr);
+                            menu_mgr.close_all_sessions();
                             app_handle.exit(0);
                         }
                         _ => {}
@@ -402,6 +533,10 @@ fn main() {
             commands::studio_direct_start,
             commands::studio_direct_stop,
             commands::studio_stream_frame,
+            commands::studio_native_start,
+            commands::studio_native_update,
+            commands::studio_native_stop,
+            commands::studio_status,
             commands::studio_sensors_set,
             commands::studio_telemetry,
             commands::studio_server_start,
@@ -412,9 +547,25 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("构建 Tauri 应用失败")
         .run(move |_app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
-                cleanup_studio.shutdown(&cleanup_mgr);
-                cleanup_mgr.close_all_sessions();
+            let _keep = &single_guard;
+            match event {
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    let keep_alive = !exit_force_quit.load(Ordering::SeqCst)
+                        && (exit_studio.is_rust_owned_streaming()
+                            || exit_mgr.has_any_direct_rgb());
+                    if keep_alive {
+                        // 纯 Rust 托盘常驻模式：WebView2 已被销毁，保持极简 Rust 进程在托盘继续推流
+                        api.prevent_exit();
+                        return;
+                    }
+                    cleanup_studio.shutdown(&cleanup_mgr);
+                    cleanup_mgr.close_all_sessions();
+                }
+                tauri::RunEvent::Exit => {
+                    cleanup_studio.shutdown(&cleanup_mgr);
+                    cleanup_mgr.close_all_sessions();
+                }
+                _ => {}
             }
         });
 }

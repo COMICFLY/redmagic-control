@@ -9,8 +9,10 @@ import {
   StudioController,
   applyPaintTemplate,
   buildExternalExamplePython,
+  buildNativeConfig,
   createInitialStudioState,
   hexToRgb,
+  isNativeEligible,
   rgbToHex,
 } from "./studio.js";
 
@@ -230,7 +232,14 @@ function renderRailStreamCard() {
   const fps = st.serverStatus?.running
     ? (st.serverStatus.fps || 0)
     : (st.streamFps || (is24g ? 8 : 30));
-  const title = st.serverStatus?.running ? "外部控灯桥运行中" : "灯效后台推流中";
+  const title = st.serverStatus?.running
+    ? "外部控灯桥运行中"
+    : st.nativeStreaming
+      ? "纯 Rust 后台推流"
+      : "JS 脚本后台推流";
+  const subHint = (st.nativeStreaming || st.serverStatus?.running)
+    ? `${studioSourceLabel(st)} · 挂起零浏览器占用`
+    : `${studioSourceLabel(st)} · 支持托盘挂起`;
 
   card.hidden = false;
   card.innerHTML = `
@@ -241,11 +250,39 @@ function renderRailStreamCard() {
       </span>
       <span class="mono rail-stream-fps" id="rail-stream-fps">${fps} FPS</span>
     </button>
-    <div class="rail-stream-sub" title="点击关闭按钮或最小化将保持后台稳帧推流">${esc(studioSourceLabel(st))} · 支持托盘挂起</div>
+    <div class="rail-stream-sub" title="点击关闭或挂起至托盘将释放界面进程，后台极低占用持续推流">${esc(subHint)}</div>
     <div class="rail-stream-actions">
       <button type="button" class="btn btn-secondary btn-sm" id="rail-tray-btn" title="隐藏到 Windows 系统托盘继续推流">${icon("minus", 12)}挂起至托盘</button>
       <button type="button" class="btn btn-danger btn-sm" id="rail-stop-stream-btn" title="停止推流并恢复键盘原板载灯效">${icon("stop", 12)}停止</button>
     </div>`;
+}
+
+let nativeUpdateTimer = null;
+function scheduleNativeConfigSync() {
+  const st = state.ui.studio;
+  if (!st.streaming || !st.nativeStreaming || !window.rm?.updateNativeRgb) return;
+  if (nativeUpdateTimer) clearTimeout(nativeUpdateTimer);
+  nativeUpdateTimer = setTimeout(() => {
+    nativeUpdateTimer = null;
+    if (state.ui.studio.streaming && state.ui.studio.nativeStreaming) {
+      window.rm.updateNativeRgb(buildNativeConfig(state.ui.studio)).catch(() => {});
+    }
+  }, 25);
+}
+
+async function handoffCustomJsIfNeeded() {
+  const st = state.ui.studio;
+  if (!st.streaming || !st.nativeStreaming || isNativeEligible(st)) return;
+  const kb = keyboardDevice();
+  if (!kb) return;
+  try {
+    await callApi("stopNativeRgb");
+    st.nativeStreaming = false;
+    await callApi("startDirectRgb", kb.id, st.includeLogo);
+    await syncStudioSensors();
+    studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
+    renderRailStreamCard();
+  } catch (_) {}
 }
 
 async function hideWindowToTray() {
@@ -363,18 +400,25 @@ async function syncStudioSensors() {
 async function stopStudioStreamingIfNeeded(silent = false) {
   const st = state.ui.studio;
   const hadServer = Boolean(st.serverStatus?.running);
+  const hadNative = Boolean(st.nativeStreaming);
   const hadStream = Boolean(st.streaming);
-  if (!hadStream && !hadServer) return;
+  if (!hadStream && !hadServer && !hadNative) return;
   const dev = keyboardDevice() || currentDevice();
   st.streaming = false;
+  st.nativeStreaming = false;
   st.streamFps = 0;
   studioCtrl.stopBackgroundLoop();
+  if (hadNative && window.rm?.stopNativeRgb) {
+    try {
+      await callApi("stopNativeRgb");
+    } catch (_) {}
+  }
   if (hadServer && window.rm?.stopExternalRgbServer) {
     try {
       st.serverStatus = await callApi("stopExternalRgbServer");
     } catch (_) {}
   }
-  if (hadStream && dev && window.rm?.stopDirectRgb) {
+  if (hadStream && !hadNative && dev && window.rm?.stopDirectRgb) {
     try {
       await callApi("stopDirectRgb", dev.id);
     } catch (_) {}
@@ -1283,6 +1327,10 @@ function bindEvents() {
       // 推流运行期间在脚本/多图层间切换时无缝热切换推流源，不断流
       if (st.streaming && (nextSub === "script" || nextSub === "layers")) {
         st.streamSource = nextSub;
+        if (st.nativeStreaming) {
+          if (isNativeEligible(st)) scheduleNativeConfigSync();
+          else await handoffCustomJsIfNeeded();
+        }
       }
       await syncStudioSensors();
       renderDeviceRail();
@@ -1352,6 +1400,21 @@ function bindEvents() {
       st.p3 = preset.p3;
       st.scriptSensors = { ...preset.sensors };
       await syncStudioSensors();
+      if (st.streaming) {
+        if (st.nativeStreaming) {
+          scheduleNativeConfigSync();
+        } else if (isNativeEligible(st)) {
+          // 从自定义 JS 切回内置预设时，自动切回纯 Rust 极低占用引擎
+          const kb = keyboardDevice();
+          if (kb) {
+            try {
+              await callApi("stopDirectRgb", kb.id);
+              await callApi("startNativeRgb", kb.id, buildNativeConfig(st));
+              st.nativeStreaming = true;
+            } catch (_) {}
+          }
+        }
+      }
       renderDeviceRail();
       renderWorkspace();
       return;
@@ -1431,13 +1494,24 @@ function bindEvents() {
             st.serverStatus = await callApi("stopExternalRgbServer");
           }
           st.streamSource = st.subMode === "layers" ? "layers" : "script";
-          await callApi("startDirectRgb", dev.id, st.includeLogo);
-          st.streaming = true;
-          st.streamFps = 0;
-          await syncStudioSensors();
-          studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
-          setSyncText("RAM 实时推流中", "is-live");
-          toast("已开启实时 RAM 推流", "支持切页、最小化或点击「后台挂起」至托盘持续运行");
+          if (isNativeEligible(st) && window.rm?.startNativeRgb) {
+            await callApi("startNativeRgb", dev.id, buildNativeConfig(st));
+            st.streaming = true;
+            st.nativeStreaming = true;
+            st.streamFps = 0;
+            studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
+            setSyncText("纯 Rust 推流中", "is-live");
+            toast("已开启纯 Rust 零损耗推流", "挂起至托盘后自动释放浏览器进程（<0.3% CPU / ~15MB 内存）");
+          } else {
+            await callApi("startDirectRgb", dev.id, st.includeLogo);
+            st.streaming = true;
+            st.nativeStreaming = false;
+            st.streamFps = 0;
+            await syncStudioSensors();
+            studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
+            setSyncText("JS 脚本推流中", "is-live");
+            toast("已开启自定义 JS 实时推流", "挂起至托盘后自动关闭 GPU 合成（0% GPU 占用）");
+          }
           renderAll();
         } catch (err) {
           toast("开启实时推流失败", err.message, true);
@@ -1457,12 +1531,13 @@ function bindEvents() {
         } else {
           if (st.streaming) {
             st.streaming = false;
+            st.nativeStreaming = false;
             st.streamFps = 0;
           }
           st.serverStatus = await callApi("startExternalRgbServer", dev.id, st.udpPort, st.httpPort, st.includeLogo);
           studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
           setSyncText("外部控灯桥运行中", "is-live");
-          toast("本地回环控灯桥已启动", `UDP 127.0.0.1:${st.udpPort} · 窗口关闭将自动挂起至托盘`);
+          toast("本地回环控灯桥已启动", `UDP 127.0.0.1:${st.udpPort} · 挂起至托盘零浏览器占用`);
         }
         renderAll();
       } catch (err) {
@@ -1484,6 +1559,9 @@ function bindEvents() {
     const st = state.ui.studio;
     if (el.id === "studio-code-editor") {
       st.scriptCode = el.value;
+      if (st.streaming && st.nativeStreaming && !isNativeEligible(st)) {
+        handoffCustomJsIfNeeded();
+      }
       return;
     }
     if (el.dataset.studioParam) {
@@ -1491,12 +1569,14 @@ function bindEvents() {
       st[p] = Number(el.value) / 100;
       const valEl = $(`#studio-${p}-val`);
       if (valEl) valEl.textContent = `${el.value}%`;
+      scheduleNativeConfigSync();
       return;
     }
     if (el.id === "studio-bri-range") {
       st.brightness = Number(el.value) / 100;
       const valEl = $("#studio-bri-val");
       if (valEl) valEl.textContent = `${el.value}%`;
+      scheduleNativeConfigSync();
       return;
     }
     if (el.id === "studio-paint-picker") {
@@ -1507,11 +1587,13 @@ function bindEvents() {
     if (el.dataset.layerRange) {
       const [lk, fk] = el.dataset.layerRange.split(".");
       if (st.layers[lk]) st.layers[lk][fk] = Number(el.value) / 100;
+      scheduleNativeConfigSync();
       return;
     }
     if (el.dataset.layerField) {
       const [lk, fk] = el.dataset.layerField.split(".");
       if (st.layers[lk]) st.layers[lk][fk] = el.value;
+      scheduleNativeConfigSync();
       return;
     }
     if (el.id === "studio-udp-port") {
@@ -1719,12 +1801,16 @@ function bindEvents() {
     if (el.id === "studio-logo-sync") {
       st.includeLogo = el.checked;
       if (st.streaming) {
-        const dev = currentDevice();
-        if (dev && dev.kind === "keyboard") {
-          try {
-            await callApi("stopDirectRgb", dev.id);
-            await callApi("startDirectRgb", dev.id, st.includeLogo);
-          } catch (_) {}
+        if (st.nativeStreaming) {
+          scheduleNativeConfigSync();
+        } else {
+          const dev = currentDevice();
+          if (dev && dev.kind === "keyboard") {
+            try {
+              await callApi("stopDirectRgb", dev.id);
+              await callApi("startDirectRgb", dev.id, st.includeLogo);
+            } catch (_) {}
+          }
         }
       }
       return;
@@ -1738,6 +1824,7 @@ function bindEvents() {
     if (el.dataset.layerToggle) {
       const lk = el.dataset.layerToggle;
       if (st.layers[lk]) st.layers[lk].enabled = el.checked;
+      scheduleNativeConfigSync();
       await syncStudioSensors();
       renderWorkspace();
       return;
@@ -1931,9 +2018,28 @@ async function boot() {
       }
     }
   });
+  // 窗口最小化 / 托盘隐藏时立即冻结所有前台 rAF 与 CSS 毛玻璃合成，使 WebView2 GPU 占用归零
+  const suspendForegroundVisuals = () => {
+    document.body.classList.add("is-tray-hidden");
+    lighting.stop();
+    studioCtrl.detach();
+  };
+  const resumeForegroundVisuals = () => {
+    if (!document.body.classList.contains("is-tray-hidden")) return;
+    document.body.classList.remove("is-tray-hidden");
+    renderWorkspace();
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) suspendForegroundVisuals();
+    else resumeForegroundVisuals();
+  });
+  window.rm?.onTrayHidden?.(suspendForegroundVisuals);
+  window.rm?.onTrayShown?.(resumeForegroundVisuals);
+
   window.rm?.onStudioStopped?.(() => {
     const st = state.ui.studio;
     st.streaming = false;
+    st.nativeStreaming = false;
     st.streamFps = 0;
     if (st.serverStatus) st.serverStatus.running = false;
     st.telemetry.audio.active = false;
@@ -1975,19 +2081,55 @@ async function boot() {
       : (state.devices[0]?.id || null);
     renderAll();
     if (state.activeId) await loadDeviceState(state.activeId);
-    if (initStream) {
+
+    // 若从纯 Rust 托盘挂起态（WebView2 曾被彻底销毁）重新打开界面，无缝还原后台正在运行的推流/服务状态
+    if (window.rm?.getStudioStatus) {
+      try {
+        const srvSt = await callApi("getStudioStatus");
+        const st = state.ui.studio;
+        if (srvSt?.native?.running && srvSt.native.config) {
+          const cfg = srvSt.native.config;
+          st.streaming = true;
+          st.nativeStreaming = true;
+          st.streamFps = srvSt.native.fps || 0;
+          st.streamSource = cfg.mode === "layers" ? "layers" : "script";
+          st.subMode = st.streamSource;
+          st.p1 = cfg.p1 ?? st.p1;
+          st.p2 = cfg.p2 ?? st.p2;
+          st.p3 = cfg.p3 ?? st.p3;
+          st.brightness = cfg.brightness ?? st.brightness;
+          st.includeLogo = cfg.includeLogo ?? st.includeLogo;
+          if (cfg.layers) st.layers = { ...st.layers, ...cfg.layers };
+          const found = STUDIO_SCRIPTS.find((s) => s.id === cfg.presetId);
+          if (found) {
+            st.scriptId = found.id;
+            st.scriptCode = found.code;
+            st.scriptSensors = { ...found.sensors };
+          }
+          studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
+          setSyncText("纯 Rust 推流中", "is-live");
+        } else if (srvSt?.server?.running) {
+          st.serverStatus = srvSt.server;
+          studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
+          setSyncText("外部控灯桥运行中", "is-live");
+        }
+      } catch (_) {}
+    }
+
+    if (initStream && !state.ui.studio.streaming) {
       const kb = keyboardDevice();
       if (kb) {
         try {
           state.ui.studio.streamSource = state.ui.studio.subMode === "layers" ? "layers" : "script";
-          await callApi("startDirectRgb", kb.id, state.ui.studio.includeLogo);
+          await callApi("startNativeRgb", kb.id, buildNativeConfig(state.ui.studio));
           state.ui.studio.streaming = true;
+          state.ui.studio.nativeStreaming = true;
           studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
         } catch (_) {}
       }
     }
-    if (state.tab === "studio" || initStream) {
-      await syncStudioSensors();
+    if (state.tab === "studio" || state.ui.studio.streaming || state.ui.studio.serverStatus?.running) {
+      if (!state.ui.studio.nativeStreaming) await syncStudioSensors();
       renderAll();
     }
     // 后台预拉其余在线设备电量，左侧栏立即可见

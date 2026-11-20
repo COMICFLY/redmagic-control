@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::devices::catalog::get_metadata_json;
 use crate::devices::manager::{DeviceDescriptor, DeviceManager};
+use crate::studio::runner::NativeStreamConfig;
 use crate::studio::server::{DEFAULT_HTTP_PORT, DEFAULT_UDP_PORT};
 use crate::studio::StudioEngine;
 
@@ -300,9 +301,15 @@ pub async fn studio_direct_start(
     include_logo: bool,
 ) -> Result<Value, String> {
     let mgr = state.manager.clone();
-    tokio::task::spawn_blocking(move || mgr.start_direct_rgb(&id, include_logo))
-        .await
-        .map_err(|e| format!("开启实时灯效推流异常: {e}"))?
+    let studio = state.studio.clone();
+    tokio::task::spawn_blocking(move || {
+        if studio.runner.is_running() {
+            studio.runner.stop(&mgr);
+        }
+        mgr.start_direct_rgb(&id, include_logo)
+    })
+    .await
+    .map_err(|e| format!("开启实时灯效推流异常: {e}"))?
 }
 
 #[tauri::command]
@@ -310,6 +317,9 @@ pub async fn studio_direct_stop(state: State<'_, AppState>, id: String) -> Resul
     let mgr = state.manager.clone();
     let studio = state.studio.clone();
     tokio::task::spawn_blocking(move || {
+        if studio.runner.is_running() {
+            studio.runner.stop(&mgr);
+        }
         if studio.server.is_running() {
             studio.server.stop(&mgr);
         }
@@ -317,6 +327,74 @@ pub async fn studio_direct_stop(state: State<'_, AppState>, id: String) -> Resul
     })
     .await
     .map_err(|e| format!("停止实时灯效推流异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn studio_native_start(
+    state: State<'_, AppState>,
+    id: String,
+    config: NativeStreamConfig,
+) -> Result<Value, String> {
+    let mgr = state.manager.clone();
+    let studio = state.studio.clone();
+    tokio::task::spawn_blocking(move || {
+        if studio.server.is_running() {
+            studio.server.stop(&mgr);
+        }
+        let st = studio.runner.start(
+            mgr,
+            id,
+            studio.audio.clone(),
+            studio.ambilight.clone(),
+            studio.keys.clone(),
+            config,
+        )?;
+        Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
+    })
+    .await
+    .map_err(|e| format!("启动纯 Rust 后台推流异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn studio_native_update(
+    state: State<'_, AppState>,
+    config: NativeStreamConfig,
+) -> Result<Value, String> {
+    let mgr = state.manager.clone();
+    let studio = state.studio.clone();
+    tokio::task::spawn_blocking(move || {
+        let st = studio.runner.update_config(
+            &mgr,
+            &studio.audio,
+            &studio.ambilight,
+            &studio.keys,
+            config,
+        )?;
+        Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
+    })
+    .await
+    .map_err(|e| format!("更新后台推流参数异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn studio_native_stop(state: State<'_, AppState>) -> Result<Value, String> {
+    let mgr = state.manager.clone();
+    let studio = state.studio.clone();
+    tokio::task::spawn_blocking(move || {
+        let st = studio.runner.stop(&mgr);
+        Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
+    })
+    .await
+    .map_err(|e| format!("停止后台推流异常: {e}"))?
+}
+
+#[tauri::command]
+pub fn studio_status(state: State<'_, AppState>) -> Value {
+    json!({
+        "native": state.studio.runner.status(),
+        "server": state.studio.server.status(),
+        "directActive": state.manager.has_any_direct_rgb(),
+    })
 }
 
 #[tauri::command]
@@ -365,12 +443,15 @@ pub async fn studio_server_start(
     include_logo: Option<bool>,
 ) -> Result<Value, String> {
     let mgr = state.manager.clone();
-    let srv = state.studio.server.clone();
+    let studio = state.studio.clone();
     let up = udp_port.unwrap_or(DEFAULT_UDP_PORT);
     let hp = http_port.unwrap_or(DEFAULT_HTTP_PORT);
     let logo = include_logo.unwrap_or(true);
     tokio::task::spawn_blocking(move || {
-        let st = srv.start(mgr, id, up, hp, logo)?;
+        if studio.runner.is_running() {
+            studio.runner.stop(&mgr);
+        }
+        let st = studio.server.start(mgr, id, up, hp, logo)?;
         Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
     })
     .await
@@ -390,9 +471,25 @@ pub async fn studio_server_stop(state: State<'_, AppState>) -> Result<Value, Str
 }
 
 #[tauri::command]
-pub fn app_hide_to_tray(window: tauri::WebviewWindow) -> Result<Value, String> {
+pub fn app_hide_to_tray(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+) -> Result<Value, String> {
+    // 若由纯 Rust 引擎或外部 API 桥驱动，直接销毁 WebView2 释放全部 ~300MB 内存与 6 个浏览器进程！
+    if state.studio.is_rust_owned_streaming() {
+        window
+            .destroy()
+            .map_err(|e| format!("释放前端窗口失败: {e}"))?;
+        return Ok(json!({ "ok": true, "mode": "headless-rust" }));
+    }
+    // 手写自定义 JS 脚本模式：隐藏窗口并关闭 WebView2 可见性合成，使 GPU 占用降至 0%
+    let _ = window.emit("studio:tray-hidden", json!({ "ok": true }));
+    #[cfg(windows)]
+    let _ = window.with_webview(|wv| unsafe {
+        let _ = wv.controller().SetIsVisible(false);
+    });
     window.hide().map_err(|e| format!("隐藏到系统托盘失败: {e}"))?;
-    Ok(json!({ "ok": true }))
+    Ok(json!({ "ok": true, "mode": "hidden-webview" }))
 }
 
 #[tauri::command]

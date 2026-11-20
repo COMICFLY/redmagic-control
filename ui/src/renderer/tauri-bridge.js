@@ -61,6 +61,12 @@
     stopDirectRgb: (id) => safeInvoke("studio_direct_stop", { id }),
     streamRgbFrame: (id, keysRgb, logoRgb = null) =>
       safeInvoke("studio_stream_frame", { id, keysRgb, logoRgb }),
+    startNativeRgb: (id, config) =>
+      safeInvoke("studio_native_start", { id, config }),
+    updateNativeRgb: (config) =>
+      safeInvoke("studio_native_update", { config }),
+    stopNativeRgb: () => safeInvoke("studio_native_stop"),
+    getStudioStatus: () => safeInvoke("studio_status"),
     setStudioSensors: (audio, ambilight, keys) =>
       safeInvoke("studio_sensors_set", { audio, ambilight, keys }),
     pollStudioTelemetry: () => safeInvoke("studio_telemetry"),
@@ -74,6 +80,7 @@
     onDeviceEvent: (cb) => bindEvent("device:event", cb),
     onStudioStopped: (cb) => bindEvent("studio:stopped", cb),
     onTrayHidden: (cb) => bindEvent("studio:tray-hidden", cb),
+    onTrayShown: (cb) => bindEvent("studio:tray-shown", cb),
     win: {
       minimize: () => getCurrentWindow && getCurrentWindow().minimize(),
       toggleMax: async () => {
