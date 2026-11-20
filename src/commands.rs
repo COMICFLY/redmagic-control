@@ -13,6 +13,9 @@ use crate::devices::manager::{DeviceDescriptor, DeviceManager};
 use crate::studio::runner::NativeStreamConfig;
 use crate::studio::server::{DEFAULT_HTTP_PORT, DEFAULT_UDP_PORT};
 use crate::studio::StudioEngine;
+use crate::updater::{
+    check_latest_release, open_external_url, AUTHOR_URL, RELEASES_URL, REPO_OWNER, REPO_URL,
+};
 
 pub struct AppState {
     pub manager: DeviceManager,
@@ -28,7 +31,30 @@ pub struct ScreenUploadOpts {
 
 #[tauri::command]
 pub fn app_meta() -> Value {
-    get_metadata_json(env!("CARGO_PKG_VERSION"))
+    let mut meta = get_metadata_json(env!("CARGO_PKG_VERSION"));
+    if let Some(obj) = meta.as_object_mut() {
+        obj.insert("author".into(), json!(REPO_OWNER));
+        obj.insert("authorUrl".into(), json!(AUTHOR_URL));
+        obj.insert("repoUrl".into(), json!(REPO_URL));
+        obj.insert("releasesUrl".into(), json!(RELEASES_URL));
+    }
+    meta
+}
+
+#[tauri::command]
+pub async fn app_check_update() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| {
+        let res = check_latest_release(env!("CARGO_PKG_VERSION"))?;
+        Ok::<Value, String>(serde_json::to_value(res).unwrap_or_else(|_| json!({})))
+    })
+    .await
+    .map_err(|e| format!("检查更新任务异常: {e}"))?
+}
+
+#[tauri::command]
+pub fn app_open_url(url: String) -> Result<Value, String> {
+    open_external_url(&url)?;
+    Ok(json!({ "ok": true }))
 }
 
 #[tauri::command]

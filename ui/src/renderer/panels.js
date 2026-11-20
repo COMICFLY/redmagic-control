@@ -1142,3 +1142,245 @@ export function renderStudio(device, hwState, ui) {
       </section>
     </div>`;
 }
+
+/* ---- 视图 7：关于软件、作者名片与在线更新中心 ---- */
+function formatBytesMb(bytes) {
+  if (!bytes || !Number.isFinite(bytes)) return "";
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatIsoDate(iso) {
+  if (!iso) return "";
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(iso));
+  return m ? m[1] : String(iso);
+}
+
+function formatReleaseNotes(md) {
+  const src = String(md || "").trim();
+  if (!src) return `<p class="notes-empty">暂无更新说明，点击下方按钮前往 GitHub Release 页面查看详情。</p>`;
+  const lines = src.split(/\r?\n/);
+  const out = [];
+  let inList = false;
+  const inlineFmt = (s) => esc(s)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, '<code class="mono">$1</code>');
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) {
+      if (inList) { out.push("</ul>"); inList = false; }
+      continue;
+    }
+    if (/^#{1,3}\s+/.test(line)) {
+      if (inList) { out.push("</ul>"); inList = false; }
+      out.push(`<h4>${inlineFmt(line.replace(/^#{1,3}\s+/, ""))}</h4>`);
+    } else if (/^[-*•]\s+/.test(line) || /^\d+\.\s+/.test(line)) {
+      if (!inList) { out.push("<ul>"); inList = true; }
+      out.push(`<li>${inlineFmt(line.replace(/^(?:[-*•]|\d+\.)\s+/, ""))}</li>`);
+    } else {
+      if (inList) { out.push("</ul>"); inList = false; }
+      out.push(`<p>${inlineFmt(line)}</p>`);
+    }
+  }
+  if (inList) out.push("</ul>");
+  return out.join("");
+}
+
+export function renderAbout(meta, update) {
+  const version = meta?.version || "0.5.0";
+  const author = meta?.author || "COMICFLY";
+  const authorUrl = meta?.authorUrl || "https://github.com/COMICFLY";
+  const repoUrl = meta?.repoUrl || "https://github.com/COMICFLY/redmagic-control";
+  const releasesUrl = meta?.releasesUrl || `${repoUrl}/releases`;
+  const issuesUrl = `${repoUrl}/issues`;
+
+  const checking = Boolean(update?.checking);
+  const info = update?.info || null;
+  const err = update?.error || "";
+  const autoCheck = update?.autoCheck !== false;
+
+  let statusClass = "is-idle";
+  let statusIcon = "info";
+  let statusTitle = `当前运行版本 v${version}`;
+  let statusDesc = "点击「立即检查更新」连接 GitHub Releases 检测最新版本";
+  if (checking) {
+    statusClass = "is-checking";
+    statusIcon = "refresh";
+    statusTitle = "正在检查更新…";
+    statusDesc = "通过 Windows 原生 WinHTTP HTTPS 访问 api.github.com";
+  } else if (err) {
+    statusClass = "is-error";
+    statusIcon = "info";
+    statusTitle = "更新检查失败";
+    statusDesc = err;
+  } else if (info?.hasUpdate) {
+    statusClass = "is-available";
+    statusIcon = "arrowUpCircle";
+    statusTitle = `发现新版本 v${info.latestVersion}`;
+    const sizeText = info.assetSize ? ` · ${formatBytesMb(info.assetSize)}` : "";
+    const dateText = info.publishedAt ? ` · ${formatIsoDate(info.publishedAt)}` : "";
+    statusDesc = `当前 v${info.currentVersion} → 最新 v${info.latestVersion}${sizeText}${dateText}`;
+  } else if (info) {
+    statusClass = "is-latest";
+    statusIcon = "check";
+    statusTitle = `已是最新版本 (v${version})`;
+    statusDesc = `最近检查：${info.checkedAt || "刚刚"} · 远端最新 ${info.tagName || `v${version}`}`;
+  }
+
+  const notesHtml = info?.releaseNotes
+    ? formatReleaseNotes(info.releaseNotes)
+    : `<h4>REDMAGIC Control v${esc(version)} 核心特性</h4>
+       <ul>
+         <li><strong>纯 Rust + Tauri v2</strong>：移除 Node.js / Electron / C hidapi，单文件独立运行约 9.4 MB。</li>
+         <li><strong>全三模底层通信</strong>：Win32 Overlapped HID + 2.4G 24B 分包唤醒 + SetupAPI 蓝牙 BLE 电量。</li>
+         <li><strong>灯效编程工作室</strong>：板载逐键涂色 (OP 0x0a/0x0b) + 纯 Rust 零 WebView2 托盘挂起推流 (OP 0x12/0x28)。</li>
+         <li><strong>320×172 小屏与在线更新</strong>：彩屏壁纸裁切烧录 (0xCE0000) + 原生 WinHTTP 自动更新提醒。</li>
+       </ul>`;
+
+  return `
+    <div class="workbench is-about">
+      <section class="card">
+        <div class="about-hero">
+          <div class="about-brand-badge" aria-hidden="true">R</div>
+          <div class="about-hero-copy">
+            <div class="about-title-row">
+              <h2 class="about-app-name">REDMAGIC Control</h2>
+              <span class="conn-badge is-wired mono">v${esc(version)}</span>
+            </div>
+            <p class="card-desc">红魔氘锋外设轻量原生桌面控制中心 · 开源免安装单文件</p>
+            <div class="about-tech-pills mono">
+              <span class="chip">Pure Rust</span>
+              <span class="chip">Tauri v2</span>
+              <span class="chip">Win32 Native HID / BLE</span>
+              <span class="chip">Zero Telemetry</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="author-card">
+          <div class="author-avatar-wrap">
+            <img class="author-avatar" src="assets/author-avatar.png" alt="${esc(author)}" draggable="false" />
+          </div>
+          <div class="author-info">
+            <div class="author-name-row">
+              <strong class="author-name">${esc(author)}</strong>
+              <span class="author-role">Author · Maintainer</span>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" data-open-url="${esc(authorUrl)}">
+              ${icon("github", 13)}访问 GitHub 主页${icon("externalLink", 12)}
+            </button>
+          </div>
+        </div>
+
+        <div class="about-repo-box">
+          <div class="row">
+            <span class="field-label">开源项目仓库地址</span>
+            <button type="button" class="btn btn-secondary btn-sm" id="about-copy-repo-btn">${icon("copy", 12)}复制链接</button>
+          </div>
+          <div class="about-repo-url mono">${esc(repoUrl)}</div>
+          <div class="about-link-row">
+            <button type="button" class="btn btn-primary btn-sm" data-open-url="${esc(repoUrl)}">${icon("github", 13)}项目主页</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-open-url="${esc(releasesUrl)}">${icon("download", 13)}历史发行版</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-open-url="${esc(issuesUrl)}">${icon("externalLink", 13)}反馈建议</button>
+          </div>
+        </div>
+
+        <dl class="spec-list">
+          <div class="spec-item"><dt>支持外设</dt><dd>GK001S 键盘 · GS001S 鼠标</dd></div>
+          <div class="spec-item"><dt>原生通信栈</dt><dd class="mono">Win32 HID · BLE · WinHTTP</dd></div>
+        </dl>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div class="card-head-text">
+            <h2 class="card-title">版本检查与更新</h2>
+            <p class="card-desc">直连 GitHub Releases 检查最新发行版，发现新版本自动弹窗提醒</p>
+          </div>
+          <span class="chip mono">${info?.tagName ? `最新 ${esc(info.tagName)}` : `v${esc(version)}`}</span>
+        </div>
+
+        <div class="update-status-banner ${statusClass}">
+          <div class="update-status-ico${checking ? " is-spin" : ""}">${icon(statusIcon, 20)}</div>
+          <div class="update-status-copy">
+            <strong>${esc(statusTitle)}</strong>
+            <span>${esc(statusDesc)}</span>
+          </div>
+        </div>
+
+        <div class="about-update-actions">
+          <button type="button" class="btn btn-primary" id="about-check-update-btn" ${checking ? "disabled" : ""} style="flex:1">
+            ${icon("refresh", 14)}<span>${checking ? "正在连接 GitHub 检查更新…" : "立即检查更新"}</span>
+          </button>
+          ${info?.hasUpdate ? `
+            <button type="button" class="btn btn-danger" id="about-open-modal-btn">${icon("arrowUpCircle", 14)}查看更新弹窗</button>
+          ` : `
+            <button type="button" class="btn btn-secondary" data-open-url="${esc(releasesUrl)}">${icon("externalLink", 14)}Releases</button>
+          `}
+        </div>
+
+        <div class="toggle-row about-auto-row">
+          <div class="toggle-copy">
+            <strong>启动时自动检查更新</strong>
+            <small>每次打开软件后在后台静默检查 GitHub 最新版本并弹窗提示</small>
+          </div>
+          ${toggleSwitch("about-auto-update", autoCheck, 'id="about-auto-update-toggle"')}
+        </div>
+
+        <div class="stack-sm about-notes-wrap">
+          <div class="row">
+            <span class="field-label">${info ? `发行说明 · ${esc(info.releaseName || info.tagName)}` : "版本亮点"}</span>
+            ${info?.publishedAt ? `<span class="field-hint mono">${esc(formatIsoDate(info.publishedAt))}</span>` : ""}
+          </div>
+          <div class="release-notes-box">${notesHtml}</div>
+        </div>
+      </section>
+    </div>`;
+}
+
+export function renderUpdateModal(update) {
+  const info = update?.info;
+  if (!info || !info.hasUpdate) return "";
+  const dlUrl = info.downloadUrl || info.releaseUrl;
+  const sizeBadge = info.assetSize ? `<span class="chip mono">${esc(formatBytesMb(info.assetSize))}</span>` : "";
+  const dateBadge = info.publishedAt ? `<span class="chip mono">${esc(formatIsoDate(info.publishedAt))}</span>` : "";
+
+  return `
+    <div class="modal-card">
+      <div class="modal-head">
+        <div class="modal-head-left">
+          <span class="modal-badge-ico">${icon("arrowUpCircle", 18)}</span>
+          <div>
+            <h2 class="modal-title" id="update-modal-title">发现新版本 ${esc(info.tagName)}</h2>
+            <p class="card-desc">${esc(info.releaseName || "REDMAGIC Control 新版本已发布")}</p>
+          </div>
+        </div>
+        <button type="button" class="icon-btn" id="update-modal-close" aria-label="关闭弹窗">${icon("x", 14)}</button>
+      </div>
+
+      <div class="modal-ver-bar">
+        <div class="modal-ver-flow mono">
+          <span class="chip">当前 v${esc(info.currentVersion)}</span>
+          <span class="modal-arrow">→</span>
+          <span class="conn-badge is-24g">最新 v${esc(info.latestVersion)}</span>
+        </div>
+        <div class="row-start">
+          ${sizeBadge}
+          ${dateBadge}
+        </div>
+      </div>
+
+      <div class="release-notes-box is-modal">
+        ${formatReleaseNotes(info.releaseNotes)}
+      </div>
+
+      <div class="modal-foot">
+        <button type="button" class="btn btn-secondary btn-sm" id="update-modal-skip">跳过此版本</button>
+        <div class="card-actions">
+          <button type="button" class="btn btn-secondary btn-sm" id="update-modal-later">稍后提醒</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-open-url="${esc(info.releaseUrl)}">${icon("externalLink", 13)}查看发布页</button>
+          <button type="button" class="btn btn-primary btn-sm" data-open-url="${esc(dlUrl)}">${icon("download", 13)}立即下载新版</button>
+        </div>
+      </div>
+    </div>`;
+}

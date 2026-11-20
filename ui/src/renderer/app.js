@@ -1,7 +1,7 @@
 /* 轻量前端主控制器：统一状态、IPC 驱动、键盘物理录入与实时硬件同步。 */
 
 import { icon } from "./icons.js";
-import { renderConnectionBanner, renderPageTelemetry, renderOverview, renderLighting, renderKeymap, renderScreen, renderHardware, renderStudio } from "./panels.js";
+import { renderConnectionBanner, renderPageTelemetry, renderOverview, renderLighting, renderKeymap, renderScreen, renderHardware, renderStudio, renderAbout, renderUpdateModal } from "./panels.js";
 import { renderBatteryGauge, renderConnectionBadge } from "./stage.js";
 import { LightingAnimator } from "./lighting.js";
 import {
@@ -27,6 +27,7 @@ const TABS = [
   { id: "keymap", label: "按键映射", ico: "command" },
   { id: "screen", label: "小屏图片", ico: "monitor", kbOnly: true },
   { id: "hardware", label: "硬件诊断", ico: "cpu" },
+  { id: "about", label: "关于", ico: "info" },
 ];
 
 const CODE_TO_HEX = {
@@ -85,6 +86,13 @@ const state = {
       ...createInitialStudioState(),
       scriptSensors: { ...STUDIO_SCRIPTS[0].sensors },
     },
+    update: {
+      checking: false,
+      info: null,
+      error: "",
+      modalOpen: false,
+      autoCheck: localStorage.getItem("rm_auto_update") !== "0",
+    },
   },
   busy: false,
 };
@@ -135,9 +143,12 @@ function renderNavTabs() {
   const isKb = !dev || dev.kind === "keyboard";
   if (!isKb && (state.tab === "screen" || state.tab === "studio")) state.tab = "overview";
   const visibleTabs = TABS.filter((t) => !t.kbOnly || isKb);
+  const hasUpd = Boolean(state.ui.update?.info?.hasUpdate);
   $("#nav-tabs").innerHTML = visibleTabs.map((t) =>
-    `<button type="button" class="nav-tab" role="tab" data-tab="${t.id}" aria-selected="${state.tab === t.id}">${icon(t.ico, 15)}<span>${t.label}</span></button>`
+    `<button type="button" class="nav-tab" role="tab" data-tab="${t.id}" aria-selected="${state.tab === t.id}">${icon(t.ico, 15)}<span>${t.label}</span>${t.id === "about" && hasUpd ? '<span class="nav-update-dot" aria-label="发现新版本"></span>' : ""}</button>`
   ).join("");
+  const verBtn = $("#app-version");
+  if (verBtn) verBtn.classList.toggle("has-update", hasUpd);
 }
 
 function renderDeviceRail() {
@@ -452,9 +463,82 @@ async function loadPaintGroupFromHw(group, { forceOverwrite = true, silent = fal
   }
 }
 
+async function openExternalUrl(url) {
+  if (!url) return;
+  try {
+    await callApi("openUrl", url);
+  } catch (err) {
+    toast("无法打开链接", err.message, true);
+  }
+}
+
+function renderUpdateModalOverlay() {
+  const el = $("#update-modal");
+  if (!el) return;
+  const upd = state.ui.update;
+  if (!upd.modalOpen || !upd.info?.hasUpdate) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = renderUpdateModal(upd);
+}
+
+async function checkForUpdates({ silent = false, forceModal = false } = {}) {
+  const upd = state.ui.update;
+  if (upd.checking || !window.rm?.checkUpdate) return;
+  upd.checking = true;
+  upd.error = "";
+  if (state.tab === "about") renderWorkspace();
+  try {
+    const info = await callApi("checkUpdate");
+    upd.info = info;
+    if (info?.hasUpdate) {
+      const skipped = localStorage.getItem("rm_skipped_version");
+      if (forceModal || !silent || skipped !== info.latestVersion) {
+        upd.modalOpen = true;
+        renderUpdateModalOverlay();
+      }
+      if (!silent) toast(`发现新版本 ${info.tagName}`, `当前 v${info.currentVersion} → 最新 v${info.latestVersion}`);
+    } else if (!silent) {
+      toast("已是最新版本", `当前 v${info?.currentVersion || state.meta?.version || ""} 已与远端保持同步`);
+    }
+  } catch (err) {
+    upd.error = err.message || "无法连接 GitHub";
+    if (!silent) toast("检查更新失败", upd.error, true);
+  } finally {
+    upd.checking = false;
+    renderNavTabs();
+    if (state.tab === "about") renderWorkspace();
+  }
+}
+
 function renderWorkspace() {
   const dev = currentDevice();
   const root = $("#workspace");
+
+  if (state.tab === "about") {
+    lighting.stop();
+    studioCtrl.detach();
+    root.innerHTML = `
+      <div class="page-head">
+        <div class="page-head-main">
+          <h1 class="page-title">关于软件</h1>
+          <p class="page-sub">
+            <span>REDMAGIC Control</span>
+            <span>·</span>
+            <span class="mono">v${esc(state.meta?.version || "0.5.0")}</span>
+            <span>·</span>
+            <span>by ${esc(state.meta?.author || "COMICFLY")}</span>
+          </p>
+        </div>
+      </div>
+      ${renderAbout(state.meta, state.ui.update)}
+    `;
+    return;
+  }
+
   if (!dev) {
     lighting.stop();
     studioCtrl.detach();
@@ -907,6 +991,39 @@ function bindEvents() {
       const dev = currentDevice();
       if (dev) setSyncText("已恢复板载灯效", dev.mock ? "is-mock" : "is-live");
       renderAll();
+    }
+  });
+
+  // 左下角版本号胶囊点击快速跳转至「关于软件」
+  $("#app-version")?.addEventListener("click", () => {
+    state.tab = "about";
+    renderAll();
+  });
+
+  // 更新提示弹窗交互
+  $("#update-modal")?.addEventListener("click", async (e) => {
+    if (e.target.id === "update-modal") {
+      state.ui.update.modalOpen = false;
+      renderUpdateModalOverlay();
+      return;
+    }
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    if (btn.id === "update-modal-close" || btn.id === "update-modal-later") {
+      state.ui.update.modalOpen = false;
+      renderUpdateModalOverlay();
+      return;
+    }
+    if (btn.id === "update-modal-skip") {
+      const ver = state.ui.update.info?.latestVersion;
+      if (ver) localStorage.setItem("rm_skipped_version", ver);
+      state.ui.update.modalOpen = false;
+      renderUpdateModalOverlay();
+      toast("已跳过此版本提醒", ver ? `v${ver} 将不再自动弹窗，仍可在「关于」手动更新` : "");
+      return;
+    }
+    if (btn.dataset.openUrl) {
+      await openExternalUrl(btn.dataset.openUrl);
     }
   });
 
@@ -1552,6 +1669,27 @@ function bindEvents() {
       toast("已复制 Python 控灯示例代码", `UDP ${st.udpPort} / HTTP+WS ${st.httpPort}`);
       return;
     }
+    if (el.dataset.openUrl) {
+      await openExternalUrl(el.dataset.openUrl);
+      return;
+    }
+    if (el.id === "about-copy-repo-btn") {
+      const url = state.meta?.repoUrl || "https://github.com/COMICFLY/redmagic-control";
+      navigator.clipboard?.writeText(url);
+      toast("已复制项目仓库地址", url);
+      return;
+    }
+    if (el.id === "about-check-update-btn") {
+      await checkForUpdates({ silent: false, forceModal: true });
+      return;
+    }
+    if (el.id === "about-open-modal-btn") {
+      if (state.ui.update.info?.hasUpdate) {
+        state.ui.update.modalOpen = true;
+        renderUpdateModalOverlay();
+      }
+      return;
+    }
   });
 
   // 滑块拖动即时更新标签数值，小屏缩放/底色/文字输入即时重绘预览，灯效编程热更新
@@ -1798,6 +1936,12 @@ function bindEvents() {
   // 工作区委托事件（change：开关、滑块松手、颜色选择器、下拉、数值输入）
   ws.addEventListener("change", async (e) => {
     const el = e.target;
+    if (el.id === "about-auto-update-toggle") {
+      state.ui.update.autoCheck = el.checked;
+      localStorage.setItem("rm_auto_update", el.checked ? "1" : "0");
+      toast(el.checked ? "已开启启动自动检查更新" : "已关闭启动自动检查更新", "随时可在「关于」手动检查");
+      return;
+    }
     const st = state.ui.studio;
     if (el.id === "studio-logo-sync") {
       st.includeLogo = el.checked;
@@ -1913,8 +2057,13 @@ function bindEvents() {
     e.preventDefault();
   }, { capture: true });
 
-  // 键盘物理录入目标键 + 屏蔽浏览器调试/刷新快捷键 + 小屏页面 Ctrl+V 快捷粘贴图片
+  // 键盘物理录入目标键 + Escape 关闭弹窗 + 屏蔽浏览器调试/刷新快捷键 + 小屏页面 Ctrl+V 快捷粘贴图片
   window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.ui.update.modalOpen) {
+      state.ui.update.modalOpen = false;
+      renderUpdateModalOverlay();
+      return;
+    }
     if (state.ui.capturingKey) {
       e.preventDefault();
       e.stopPropagation();
@@ -2141,6 +2290,34 @@ async function boot() {
           renderDeviceRail();
         }).catch(() => {});
       }
+    }
+
+    // 预览/测试用弹窗钩子 (?mockUpdate=1) 或正常启动 2.5s 后静默检查 GitHub 最新版本
+    const mockUpd = params.get("mockUpdate") === "1";
+    const isScriptedView = Boolean(initTab || initDev);
+    if (mockUpd) {
+      state.ui.update.info = {
+        currentVersion: state.meta?.version || "0.5.0",
+        latestVersion: "0.6.0",
+        tagName: "v0.6.0",
+        hasUpdate: true,
+        releaseName: "REDMAGIC Control v0.6.0 — 性能优化与新功能预览",
+        releaseNotes: "## 更新亮点\n- 新增 **关于软件** 页面、作者名片与项目快速入口\n- 接入 Windows 原生 `WinHTTP` 自动检查 GitHub Releases 更新\n- 发现新版本时自动弹出毛玻璃更新提醒并支持一键直链下载",
+        releaseUrl: state.meta?.releasesUrl || "https://github.com/COMICFLY/redmagic-control/releases",
+        downloadUrl: state.meta?.releasesUrl || "https://github.com/COMICFLY/redmagic-control/releases",
+        assetName: "redmagic-control-v0.6.0-windows-x64.exe",
+        assetSize: 9912320,
+        publishedAt: "2026-11-20T16:00:00Z",
+        checkedAt: "23:30:00",
+      };
+      state.ui.update.modalOpen = true;
+      renderNavTabs();
+      if (state.tab === "about") renderWorkspace();
+      renderUpdateModalOverlay();
+    } else if (!isScriptedView && state.ui.update.autoCheck) {
+      setTimeout(() => {
+        checkForUpdates({ silent: true, forceModal: false });
+      }, 2500);
     }
   } catch (err) {
     toast("初始化失败", err.message, true);

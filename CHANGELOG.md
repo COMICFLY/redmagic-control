@@ -5,6 +5,14 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-20
+
+### Added
+- **About & Update Center (`关于`)**:
+  - Dedicated frosted-glass **关于软件** page accessible from both the top navigation bar and the bottom-left version pill (`v0.5.0`), featuring author profile card (**COMICFLY** with local crisp avatar `ui/assets/author-avatar.png`), GitHub project repository links (`项目主页` / `历史发行版` / `反馈建议` / 1-click copy), and release notes viewer.
+  - **Pure-Rust WinHTTP GitHub Update Checker (`src/updater.rs`)**: Zero extra HTTP/TLS crates — calls Windows native `WinHTTP` HTTPS directly against `api.github.com/repos/COMICFLY/redmagic-control/releases/latest` (respecting system proxy), compares SemVer cleanly, and opens safe `https://` links via native Win32 `ShellExecuteW`.
+  - **Automatic Update Popup Modal**: Silently checks for new releases on startup (configurable via `启动时自动检查更新`), lights up an update dot badge on the nav & version pill, and displays a frosted-glass update modal with version diff, `.exe` asset size, formatted release notes, direct download button, and `跳过此版本` support.
+
 ## [0.4.3] - 2026-11-20
 
 ### Fixed

@@ -4,6 +4,7 @@ mod commands;
 mod devices;
 mod protocol;
 mod studio;
+mod updater;
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -325,6 +326,15 @@ fn main() {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
+    // 命令行检查更新自检（不弹窗口）
+    if args.iter().any(|a| a == "--check-update") {
+        match updater::check_latest_release(env!("CARGO_PKG_VERSION")) {
+            Ok(res) => println!("{}", serde_json::to_string_pretty(&res).unwrap()),
+            Err(e) => eprintln!("UPDATE_CHECK_ERR={e}"),
+        }
+        return;
+    }
+
     // 命令行只读自检模式（不弹窗口，用于自动化真机/Mock 协议验证）
     if args.iter().any(|a| a == "--probe") {
         let mgr = DeviceManager::new(force_mock);
@@ -512,6 +522,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_meta,
+            commands::app_check_update,
+            commands::app_open_url,
             commands::app_hide_to_tray,
             commands::device_list,
             commands::device_rescan,

@@ -14,9 +14,9 @@
 | :---: | :---: |
 | ![GK001S 灯效编程工作室](docs/screenshots/kb-studio.png) | ![GK001S 板载逐键涂色](docs/screenshots/kb-paint.png) |
 
-| GS001S 鼠标 · 5 档 DPI 与传感器控制 |
-| :---: |
-| ![GS001S 鼠标概览与 DPI](docs/screenshots/ms-overview.png) |
+| GS001S 鼠标 · 5 档 DPI 与传感器控制 | 关于软件与 GitHub 自动检查更新 |
+| :---: | :---: |
+| ![GS001S 鼠标概览与 DPI](docs/screenshots/ms-overview.png) | ![关于软件与在线更新](docs/screenshots/app-about.png) |
 
 ---
 
@@ -302,12 +302,13 @@ cargo build --release
 ├── capabilities/default.json   # 最小权限声明
 ├── icons/                      # 应用图标
 ├── src/
-│   ├── main.rs                 # 入口、单实例锁、Win11 DWM Acrylic、WebView2 容错与 --probe
-│   ├── commands.rs             # Tauri v2 IPC 命令（设备控制、灯效编程、原生选图、剪贴板）
+│   ├── main.rs                 # 入口、单实例唤醒、Win11 DWM Acrylic、原生托盘与 --probe
+│   ├── commands.rs             # Tauri v2 IPC 命令（设备控制、灯效编程、更新检查、原生选图）
+│   ├── updater.rs              # 纯 Rust WinHTTP GitHub Release 检查更新与安全外链打开
 │   ├── protocol/               # 64B HID 帧编解码、校验和、3B 键位编码与出厂 ROM 表
 │   ├── devices/                # Win32 HID/BLE 底层、GK001S/GS001S 适配器、三模管理器、小屏图库
-│   └── studio/                 # WASAPI 频谱、屏幕流光溢彩、全局按键感知、127.0.0.1 UDP/HTTP/WS 桥
-└── ui/                         # 零框架原生前端（暗黑曜石毛玻璃 + 灯效编程工作室 + 小屏裁切器）
+│   └── studio/                 # 纯 Rust 零 WebView2 后台引擎、WASAPI 频谱、流光溢彩、UDP/WS 桥
+└── ui/                         # 零框架原生前端（暗黑曜石毛玻璃 + 灯效编程 + 小屏裁切 + 关于更新）
 ```
 
 ### 版本管理规范

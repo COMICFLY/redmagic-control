@@ -43,7 +43,7 @@
           <div class="rail-footer">
             <div class="sync-meta">
               <span id="sync-status">等待读取</span>
-              <span class="mono" id="app-version">v0.3.0</span>
+              <button type="button" class="version-pill mono" id="app-version" title="点击打开关于与检查更新">v0.5.0</button>
             </div>
             <button type="button" class="btn btn-secondary" id="reload-state-btn">从设备重新读取</button>
           </div>
@@ -55,6 +55,7 @@
       </div>
     </div>
 
+    <div class="modal-backdrop" id="update-modal" role="dialog" aria-modal="true" aria-labelledby="update-modal-title" hidden></div>
     <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
     <script src="src/renderer/tauri-bridge.js"></script>
     <script type="module" src="src/renderer/app.js"></script>

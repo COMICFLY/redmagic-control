@@ -1,6 +1,6 @@
 [package]
 name = "redmagic-control"
-version = "0.4.3"
+version = "0.5.0"
 description = "REDMAGIC 外设控制中心 — 纯 Rust + Tauri v2 轻量驱动 (GK001S / GS001S)"
 edition = "2021"
 
@@ -34,6 +34,8 @@ windows-sys = { version = "0.59", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Controls",
   "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_Networking_WinHttp",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_Devices_HumanInterfaceDevice",
