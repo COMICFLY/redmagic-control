@@ -161,6 +161,10 @@ fn build_main_window(
         _ => "index.html".to_string(),
     };
 
+    let allow_devtools = std::env::var("REDMAGIC_DEVTOOLS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     WebviewWindowBuilder::new(app, "main", WebviewUrl::App(entry_url.into()))
         .title("REDMAGIC Control")
         .inner_size(1280.0, 820.0)
@@ -170,6 +174,8 @@ fn build_main_window(
         .shadow(true)
         .resizable(true)
         .center()
+        .devtools(allow_devtools)
+        .zoom_hotkeys_enabled(false)
         .effects(effects)
         .data_directory(data_dir)
         .build()
@@ -243,6 +249,22 @@ fn main() {
             #[cfg(windows)]
             if let Ok(hwnd) = win.hwnd() {
                 apply_win11_glass_chrome(hwnd.0 as *mut std::ffi::c_void);
+            }
+            #[cfg(windows)]
+            {
+                let allow_devtools = std::env::var("REDMAGIC_DEVTOOLS")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let _ = win.with_webview(move |wv| unsafe {
+                    if let Ok(core) = wv.controller().CoreWebView2() {
+                        if let Ok(settings) = core.Settings() {
+                            let _ = settings.SetAreDefaultContextMenusEnabled(allow_devtools);
+                            let _ = settings.SetAreDevToolsEnabled(allow_devtools);
+                            let _ = settings.SetIsStatusBarEnabled(false);
+                            let _ = settings.SetIsZoomControlEnabled(false);
+                        }
+                    }
+                });
             }
             let _ = win.set_focus();
 

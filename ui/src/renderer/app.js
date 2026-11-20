@@ -1194,7 +1194,12 @@ function bindEvents() {
     }
   });
 
-  // 键盘物理录入目标键 + 小屏页面 Ctrl+V 快捷粘贴图片
+  // 禁用浏览器默认右键调试菜单（保留原生桌面软件体验）
+  document.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+  }, { capture: true });
+
+  // 键盘物理录入目标键 + 屏蔽浏览器调试/刷新快捷键 + 小屏页面 Ctrl+V 快捷粘贴图片
   window.addEventListener("keydown", (e) => {
     if (state.ui.capturingKey) {
       e.preventDefault();
@@ -1210,10 +1215,23 @@ function bindEvents() {
       renderWorkspace();
       return;
     }
+
+    // 屏蔽浏览器默认快捷键（F3/F5/F12、Ctrl+R/P/S/U/F、Ctrl+Shift+I/J/C），不影响输入框复制粘贴
+    const key = e.key.toLowerCase();
+    const ctrlOrMeta = e.ctrlKey || e.metaKey;
+    if (
+      e.key === "F5" || e.key === "F3" || e.key === "F12" ||
+      (ctrlOrMeta && !e.altKey && ["r", "p", "s", "u", "f"].includes(key)) ||
+      (ctrlOrMeta && e.shiftKey && ["i", "j", "c"].includes(key))
+    ) {
+      e.preventDefault();
+      return;
+    }
+
     if (
       state.tab === "screen" &&
-      (e.ctrlKey || e.metaKey) &&
-      e.key.toLowerCase() === "v" &&
+      ctrlOrMeta &&
+      key === "v" &&
       !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)
     ) {
       e.preventDefault();
