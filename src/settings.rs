@@ -15,6 +15,9 @@ use crate::studio::server::{DEFAULT_HTTP_PORT, DEFAULT_UDP_PORT};
 const AUTOSTART_VALUE_NAME: &str = "REDMAGICControl";
 #[cfg(windows)]
 const RUN_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+#[cfg(windows)]
+const STARTUP_APPROVED_RUN_SUBKEY: &str =
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 
 fn default_true() -> bool {
     true
@@ -238,6 +241,13 @@ impl SettingsStore {
         self.inner.lock().unwrap().auto_resume_studio
     }
 
+    pub fn refresh_autostart_path_if_enabled(&self) {
+        if self.mock {
+            return;
+        }
+        refresh_windows_autostart_path_if_enabled();
+    }
+
     pub fn studio_snapshot(&self) -> PersistedStudioState {
         self.inner.lock().unwrap().studio.clone()
     }
@@ -341,7 +351,7 @@ impl SettingsStore {
         self.persist_locked(&next);
     }
 
-    pub fn save_native_config(&self, cfg: &NativeStreamConfig, running: bool) {
+    pub fn save_native_config(&self, cfg: &NativeStreamConfig, mark_pinned_streaming: bool) {
         let next = {
             let mut cur = self.inner.lock().unwrap();
             cur.studio.stream_source = if cfg.mode == "layers" {
@@ -357,7 +367,9 @@ impl SettingsStore {
             cur.studio.include_logo = cfg.include_logo;
             cur.studio.layers = cfg.layers.clone();
             cur.studio.native_eligible = true;
-            cur.studio.was_streaming = running;
+            if mark_pinned_streaming {
+                cur.studio.was_streaming = true;
+            }
             cur.clone()
         };
         self.persist_locked(&next);
@@ -433,15 +445,76 @@ fn to_wide(s: &str) -> Vec<u16> {
 }
 
 #[cfg(windows)]
-pub fn is_windows_autostart_enabled() -> bool {
+fn read_run_value(subkey_str: &str, value_name: &str) -> Option<String> {
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
     };
 
-    let subkey = to_wide(RUN_SUBKEY);
-    let val_name = to_wide(AUTOSTART_VALUE_NAME);
+    let subkey = to_wide(subkey_str);
+    let val_name = to_wide(value_name);
+    unsafe {
+        let mut hkey: HKEY = null_mut();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut hkey,
+        ) != ERROR_SUCCESS
+        {
+            return None;
+        }
+        let mut reg_type: u32 = 0;
+        let mut cb_data: u32 = 0;
+        let rc = RegQueryValueExW(
+            hkey,
+            val_name.as_ptr(),
+            null_mut(),
+            &mut reg_type,
+            null_mut(),
+            &mut cb_data,
+        );
+        if rc != ERROR_SUCCESS || cb_data < 2 {
+            RegCloseKey(hkey);
+            return None;
+        }
+        let mut buf: Vec<u16> = vec![0u16; (cb_data as usize + 1) / 2];
+        let rc2 = RegQueryValueExW(
+            hkey,
+            val_name.as_ptr(),
+            null_mut(),
+            &mut reg_type,
+            buf.as_mut_ptr() as *mut u8,
+            &mut cb_data,
+        );
+        RegCloseKey(hkey);
+        if rc2 != ERROR_SUCCESS {
+            return None;
+        }
+        while buf.last() == Some(&0) {
+            buf.pop();
+        }
+        let s = String::from_utf16_lossy(&buf).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn is_startup_approved_disabled(value_name: &str) -> bool {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
+    };
+
+    let subkey = to_wide(STARTUP_APPROVED_RUN_SUBKEY);
+    let val_name = to_wide(value_name);
     unsafe {
         let mut hkey: HKEY = null_mut();
         if RegOpenKeyExW(
@@ -455,24 +528,97 @@ pub fn is_windows_autostart_enabled() -> bool {
             return false;
         }
         let mut reg_type: u32 = 0;
-        let mut cb_data: u32 = 0;
+        let mut data = [0u8; 16];
+        let mut cb_data: u32 = data.len() as u32;
         let rc = RegQueryValueExW(
             hkey,
             val_name.as_ptr(),
             null_mut(),
             &mut reg_type,
-            null_mut(),
+            data.as_mut_ptr(),
             &mut cb_data,
         );
         RegCloseKey(hkey);
-        rc == ERROR_SUCCESS && cb_data > 2
+        // Windows 10/11 StartupApproved\Run：首字节偶数 (0x02/0x06) 表示启用，奇数 (0x03/0x07) 表示被任务管理器禁用
+        rc == ERROR_SUCCESS && cb_data >= 1 && (data[0] & 1) == 1
     }
+}
+
+#[cfg(windows)]
+fn sync_startup_approved(value_name: &str, enabled: bool) {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_SET_VALUE, REG_BINARY, REG_OPTION_NON_VOLATILE,
+    };
+
+    let subkey = to_wide(STARTUP_APPROVED_RUN_SUBKEY);
+    let val_name = to_wide(value_name);
+    unsafe {
+        let mut hkey: HKEY = null_mut();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            null_mut(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            null_mut(),
+            &mut hkey,
+            null_mut(),
+        ) != ERROR_SUCCESS
+        {
+            return;
+        }
+        if enabled {
+            // 写入标准 12 字节已启用标记，避免此前在任务管理器中禁用过导致 HKCU\Run 不生效
+            let approved: [u8; 12] = [0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            let _ = RegSetValueExW(
+                hkey,
+                val_name.as_ptr(),
+                0,
+                REG_BINARY,
+                approved.as_ptr(),
+                approved.len() as u32,
+            );
+        } else {
+            let _ = RegDeleteValueW(hkey, val_name.as_ptr());
+        }
+        RegCloseKey(hkey);
+    }
+}
+
+#[cfg(windows)]
+pub fn is_windows_autostart_enabled() -> bool {
+    if read_run_value(RUN_SUBKEY, AUTOSTART_VALUE_NAME).is_none() {
+        return false;
+    }
+    !is_startup_approved_disabled(AUTOSTART_VALUE_NAME)
 }
 
 #[cfg(not(windows))]
 pub fn is_windows_autostart_enabled() -> bool {
     false
 }
+
+#[cfg(windows)]
+pub fn refresh_windows_autostart_path_if_enabled() {
+    if !is_windows_autostart_enabled() {
+        return;
+    }
+    let exe = current_exe_display_path();
+    if exe.is_empty() {
+        return;
+    }
+    let desired = format_autostart_command(&exe);
+    if read_run_value(RUN_SUBKEY, AUTOSTART_VALUE_NAME).as_deref() != Some(desired.as_str()) {
+        let _ = set_windows_autostart(true);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn refresh_windows_autostart_path_if_enabled() {}
 
 #[cfg(windows)]
 pub fn set_windows_autostart(enabled: bool) -> Result<(), String> {
@@ -518,6 +664,7 @@ pub fn set_windows_autostart(enabled: bool) -> Result<(), String> {
                     byte_len,
                 );
                 if rc == ERROR_SUCCESS {
+                    sync_startup_approved(AUTOSTART_VALUE_NAME, true);
                     Ok(())
                 } else {
                     Err(format!("写入开机自启注册表失败 (code={rc})"))
@@ -525,6 +672,7 @@ pub fn set_windows_autostart(enabled: bool) -> Result<(), String> {
             }
         } else {
             let rc = RegDeleteValueW(hkey, val_name.as_ptr());
+            sync_startup_approved(AUTOSTART_VALUE_NAME, false);
             if rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND {
                 Ok(())
             } else {
@@ -625,5 +773,78 @@ mod tests {
             format_autostart_command(r"\\?\C:\Program Files\REDMAGIC\redmagic-control.exe"),
             "\"C:\\Program Files\\REDMAGIC\\redmagic-control.exe\" --autostart"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_registry_run_and_startup_approved_roundtrip() {
+        use std::ptr::null_mut;
+        use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+        use windows_sys::Win32::System::Registry::{
+            RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+            KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
+        };
+
+        let test_name = "REDMAGICControl_UnitTest_Temp";
+        let subkey = to_wide(RUN_SUBKEY);
+        let val_name = to_wide(test_name);
+        let cmd = format_autostart_command(r"C:\Temp\redmagic-control.exe");
+        let cmd_w = to_wide(&cmd);
+
+        unsafe {
+            let mut hkey: HKEY = null_mut();
+            assert_eq!(
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    subkey.as_ptr(),
+                    0,
+                    null_mut(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_SET_VALUE,
+                    null_mut(),
+                    &mut hkey,
+                    null_mut(),
+                ),
+                ERROR_SUCCESS
+            );
+            assert_eq!(
+                RegSetValueExW(
+                    hkey,
+                    val_name.as_ptr(),
+                    0,
+                    REG_SZ,
+                    cmd_w.as_ptr() as *const u8,
+                    (cmd_w.len() * std::mem::size_of::<u16>()) as u32,
+                ),
+                ERROR_SUCCESS
+            );
+            RegCloseKey(hkey);
+        }
+
+        sync_startup_approved(test_name, true);
+        assert_eq!(read_run_value(RUN_SUBKEY, test_name).as_deref(), Some(cmd.as_str()));
+        assert!(!is_startup_approved_disabled(test_name));
+
+        // 清理临时测试项
+        unsafe {
+            let mut hkey: HKEY = null_mut();
+            if RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                null_mut(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE,
+                null_mut(),
+                &mut hkey,
+                null_mut(),
+            ) == ERROR_SUCCESS
+            {
+                let _ = RegDeleteValueW(hkey, val_name.as_ptr());
+                RegCloseKey(hkey);
+            }
+        }
+        sync_startup_approved(test_name, false);
+        assert_eq!(read_run_value(RUN_SUBKEY, test_name), None);
     }
 }

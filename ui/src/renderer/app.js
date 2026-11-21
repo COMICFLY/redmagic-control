@@ -310,8 +310,12 @@ function buildPersistedStudioSnapshot(st) {
     udpPort: Number(st.udpPort || 27650),
     httpPort: Number(st.httpPort || 27651),
     nativeEligible: isNativeEligible(st),
-    wasStreaming: Boolean(st.streaming && st.nativeStreaming),
-    wasServerRunning: Boolean(st.serverStatus?.running),
+    wasStreaming: Boolean(
+      st.streaming || (st.pinnedAutoStart && st.subMode !== "api" && !st.serverStatus?.running)
+    ),
+    wasServerRunning: Boolean(
+      st.serverStatus?.running || (st.pinnedAutoStart && st.subMode === "api")
+    ),
   };
 }
 
@@ -343,6 +347,7 @@ function applyPersistedStudio(saved) {
   if (typeof saved.paintColor === "string" && /^#[0-9a-f]{6}$/i.test(saved.paintColor)) st.paintColor = saved.paintColor;
   if (typeof saved.udpPort === "number" && saved.udpPort >= 1024 && saved.udpPort <= 65535) st.udpPort = saved.udpPort;
   if (typeof saved.httpPort === "number" && saved.httpPort >= 1024 && saved.httpPort <= 65535) st.httpPort = saved.httpPort;
+  st.pinnedAutoStart = Boolean(saved.wasStreaming || saved.wasServerRunning);
 }
 
 let studioPersistTimer = null;
@@ -1714,18 +1719,22 @@ function bindEvents() {
             st.streaming = true;
             st.nativeStreaming = true;
             st.streamFps = 0;
+            if (state.ui.settings?.autoResumeStudio !== false) st.pinnedAutoStart = true;
+            scheduleStudioPersist(true);
             studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
             setSyncText("实时推流中", "is-live");
-            toast("已开启实时灯效推流", "支持切换页面或挂起至系统托盘后台运行");
+            toast("已开启实时灯效推流", "推流设置已自动保存，支持挂起至托盘及开机自动开启");
           } else {
             await callApi("startDirectRgb", dev.id, st.includeLogo);
             st.streaming = true;
             st.nativeStreaming = false;
             st.streamFps = 0;
+            if (state.ui.settings?.autoResumeStudio !== false) st.pinnedAutoStart = true;
+            scheduleStudioPersist(true);
             await syncStudioSensors();
             studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
             setSyncText("JS 脚本推流中", "is-live");
-            toast("已开启自定义 JS 实时推流", "挂起至托盘后自动关闭 GPU 合成（0% GPU 占用）");
+            toast("已开启自定义 JS 实时推流", "脚本代码已自动保存，挂起至托盘后自动关闭 GPU 合成");
           }
           renderAll();
         } catch (err) {
@@ -1750,6 +1759,8 @@ function bindEvents() {
             st.streamFps = 0;
           }
           st.serverStatus = await callApi("startExternalRgbServer", dev.id, st.udpPort, st.httpPort, st.includeLogo);
+          if (state.ui.settings?.autoResumeStudio !== false) st.pinnedAutoStart = true;
+          scheduleStudioPersist(true);
           studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
           setSyncText("外部控灯桥运行中", "is-live");
           toast("本地回环控灯桥已启动", `UDP 127.0.0.1:${st.udpPort} · 挂起至托盘零浏览器占用`);
@@ -2094,8 +2105,18 @@ function bindEvents() {
     }
     if (el.id === "about-auto-resume-toggle") {
       try {
-        state.ui.settings = await callApi("setSettings", { autoResumeStudio: el.checked });
-        toast(el.checked ? "已开启启动自动恢复推流" : "已关闭启动自动恢复推流", el.checked ? "重启或开机静默进托盘后将自动恢复上次灯效推流" : "重启后默认保持键盘板载灯效");
+        const checked = el.checked;
+        state.ui.studio.pinnedAutoStart = checked;
+        const snap = buildPersistedStudioSnapshot(state.ui.studio);
+        if (checked && !snap.wasStreaming && !snap.wasServerRunning) {
+          snap.wasStreaming = state.ui.studio.subMode !== "api";
+          snap.wasServerRunning = state.ui.studio.subMode === "api";
+        } else if (!checked) {
+          snap.wasStreaming = false;
+          snap.wasServerRunning = false;
+        }
+        state.ui.settings = await callApi("setSettings", { autoResumeStudio: checked, studio: snap });
+        toast(checked ? "已开启启动自动恢复推流" : "已关闭启动自动恢复推流", checked ? "重启或开机静默进托盘后将自动开启固定灯效推流" : "重启后默认保持键盘板载灯效");
       } catch (err) {
         toast("保存设置失败", err.message, true);
         renderWorkspace();
@@ -2112,6 +2133,32 @@ function bindEvents() {
       return;
     }
     const st = state.ui.studio;
+    if (el.id === "studio-auto-start-check") {
+      const checked = el.checked;
+      st.pinnedAutoStart = checked;
+      const snap = buildPersistedStudioSnapshot(st);
+      if (checked) {
+        snap.wasStreaming = st.subMode !== "api";
+        snap.wasServerRunning = st.subMode === "api";
+      } else {
+        snap.wasStreaming = false;
+        snap.wasServerRunning = false;
+      }
+      try {
+        state.ui.settings = await callApi("setSettings", {
+          autoResumeStudio: checked,
+          studio: snap,
+        });
+        toast(
+          checked ? "已固定当前推流设置" : "已取消开机自动推流",
+          checked ? "重启或开机自启时将自动开启当前灯效推流方案" : "当前参数仍会自动保存，但下次启动不自动开启推流",
+        );
+      } catch (err) {
+        toast("保存推流设置失败", err.message, true);
+      }
+      renderWorkspace();
+      return;
+    }
     if (el.id === "studio-logo-sync") {
       st.includeLogo = el.checked;
       scheduleStudioPersist();
@@ -2446,6 +2493,30 @@ async function boot() {
           setSyncText("外部控灯桥运行中", "is-live");
         }
       } catch (_) {}
+    }
+
+    // 若用户固定了手写自定义 JS 脚本并开启「开机自动推流」，在界面打开且后台未接管时自动恢复推流
+    const isScriptedInit = Boolean(initTab || initDev);
+    if (
+      !isScriptedInit &&
+      !initStream &&
+      state.ui.settings?.autoResumeStudio !== false &&
+      state.ui.settings?.studio?.wasStreaming &&
+      !state.ui.studio.streaming &&
+      !state.ui.studio.serverStatus?.running &&
+      !isNativeEligible(state.ui.studio)
+    ) {
+      const kb = keyboardDevice();
+      if (kb && !kb.mock && kb.supportsConfig !== false) {
+        try {
+          await callApi("startDirectRgb", kb.id, state.ui.studio.includeLogo);
+          state.ui.studio.streaming = true;
+          state.ui.studio.nativeStreaming = false;
+          await syncStudioSensors();
+          studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
+          setSyncText("JS 脚本推流中", "is-live");
+        } catch (_) {}
+      }
     }
 
     if (initStream && !state.ui.studio.streaming) {

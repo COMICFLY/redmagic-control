@@ -2338,6 +2338,17 @@ input[type="range"] {
   box-shadow: var(--glass-specular-soft);
 }
 
+.studio-persist-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--border-hairline);
+}
+
 .studio-bar-copy {
   min-width: 0;
   display: flex;

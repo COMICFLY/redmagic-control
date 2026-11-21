@@ -38,8 +38,9 @@ function esc(str) {
   return String(str ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-function toggleSwitch(id, checked, dataAttr) {
-  return `<label class="switch"><input type="checkbox" id="${id}" ${dataAttr}${checked ? " checked" : ""} /><span class="switch-track"></span></label>`;
+function toggleSwitch(id, checked, dataAttr = "") {
+  const extra = dataAttr ? ` ${dataAttr}` : "";
+  return `<label class="switch"><input type="checkbox" id="${id}"${extra}${checked ? " checked" : ""} /><span class="switch-track"></span></label>`;
 }
 
 function chargingLabel(state) {
@@ -912,6 +913,7 @@ export function renderStudio(device, hwState, ui) {
       </div>`;
   } else if (sub === "api") {
     const running = Boolean(st.serverStatus?.running);
+    const autoStartOn = (ui.settings?.autoResumeStudio !== false) && Boolean(st.pinnedAutoStart || running);
     leftFootHtml = `
       <div class="studio-stream-bar">
         <div class="studio-bar-copy">
@@ -924,8 +926,16 @@ export function renderStudio(device, hwState, ui) {
             ${running ? `${icon("stop", 13)}停止服务` : `${icon("play", 13)}启动本地服务`}
           </button>
         </div>
+      </div>
+      <div class="studio-persist-row">
+        <label class="studio-check">
+          <input type="checkbox" id="studio-auto-start-check"${autoStartOn ? " checked" : ""} />
+          <span>固定端口并开机自动启动服务</span>
+        </label>
+        <span class="field-hint">${autoStartOn ? "已固定 · 开机自启自动运行" : "端口已保存 · 启动不自动运行"}</span>
       </div>`;
   } else {
+    const autoStartOn = (ui.settings?.autoResumeStudio !== false) && Boolean(st.pinnedAutoStart || st.streaming);
     leftFootHtml = `
       <div class="studio-stream-bar">
         <div class="studio-stream-left">
@@ -943,6 +953,13 @@ export function renderStudio(device, hwState, ui) {
           <input type="range" id="studio-bri-range" min="15" max="100" step="5" value="${Math.round((st.brightness ?? 1) * 100)}" aria-label="推流主亮度" />
           <span class="mono field-label" id="studio-bri-val">${Math.round((st.brightness ?? 1) * 100)}%</span>
         </div>
+      </div>
+      <div class="studio-persist-row">
+        <label class="studio-check" title="勾选后自动固定当前预设、滑块、图层与亮度；下次开机自启或打开软件时自动开启推流">
+          <input type="checkbox" id="studio-auto-start-check"${autoStartOn ? " checked" : ""} />
+          <span>固定当前推流设置（开机自启自动开启）</span>
+        </label>
+        <span class="field-hint">${autoStartOn ? "已固定 · 开机自动点亮" : "参数已自动保存"}</span>
       </div>`;
   }
 
@@ -1369,7 +1386,7 @@ export function renderAbout(meta, update, settings) {
               <strong>关闭窗口时挂起至系统托盘</strong>
               <small>默认开启 · 释放浏览器进程以极低占用常驻托盘，右键托盘可退出</small>
             </div>
-            ${toggleSwitch("about-close-tray", closeToTray, 'id="about-close-tray-toggle"')}
+            ${toggleSwitch("about-close-tray-toggle", closeToTray)}
           </div>
 
           <div class="toggle-row is-compact">
@@ -1383,7 +1400,7 @@ export function renderAbout(meta, update, settings) {
               </div>
               <small>写入当前用户 Windows 启动项 (HKCU\\Run)，无需管理员权限</small>
             </div>
-            ${toggleSwitch("about-autostart", autostart, 'id="about-autostart-toggle"')}
+            ${toggleSwitch("about-autostart-toggle", autostart)}
           </div>
 
           <div class="toggle-row is-compact">
@@ -1391,7 +1408,7 @@ export function renderAbout(meta, update, settings) {
               <strong>启动时自动恢复上次推流</strong>
               <small>重启或开机静默进托盘后自动恢复上次的灯效编程推流与本地接口</small>
             </div>
-            ${toggleSwitch("about-auto-resume", autoResumeStudio, 'id="about-auto-resume-toggle"')}
+            ${toggleSwitch("about-auto-resume-toggle", autoResumeStudio)}
           </div>
 
           <div class="toggle-row is-compact">
@@ -1399,7 +1416,7 @@ export function renderAbout(meta, update, settings) {
               <strong>启动时自动检查更新</strong>
               <small>后台静默检测 GitHub 最新版本并在发现更新时弹窗提示</small>
             </div>
-            ${toggleSwitch("about-auto-update", autoCheck, 'id="about-auto-update-toggle"')}
+            ${toggleSwitch("about-auto-update-toggle", autoCheck)}
           </div>
         </div>
 

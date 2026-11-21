@@ -2,6 +2,8 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use base64::Engine;
 use serde::Deserialize;
@@ -22,6 +24,7 @@ pub struct AppState {
     pub manager: DeviceManager,
     pub studio: StudioEngine,
     pub settings: SettingsStore,
+    pub pending_auto_resume: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -387,6 +390,7 @@ pub async fn studio_native_start(
     let mgr = state.manager.clone();
     let studio = state.studio.clone();
     let settings = state.settings.clone();
+    state.pending_auto_resume.store(false, Ordering::SeqCst);
     tokio::task::spawn_blocking(move || {
         if studio.server.is_running() {
             studio.server.stop(&mgr);
@@ -437,9 +441,12 @@ pub async fn studio_native_stop(state: State<'_, AppState>) -> Result<Value, Str
     let mgr = state.manager.clone();
     let studio = state.studio.clone();
     let settings = state.settings.clone();
+    state.pending_auto_resume.store(false, Ordering::SeqCst);
     tokio::task::spawn_blocking(move || {
         let st = studio.runner.stop(&mgr);
-        settings.set_studio_running(Some(false), None);
+        if !settings.auto_resume_studio() {
+            settings.set_studio_running(Some(false), None);
+        }
         Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
     })
     .await
@@ -503,6 +510,7 @@ pub async fn studio_server_start(
     let mgr = state.manager.clone();
     let studio = state.studio.clone();
     let settings = state.settings.clone();
+    state.pending_auto_resume.store(false, Ordering::SeqCst);
     let up = udp_port.unwrap_or(DEFAULT_UDP_PORT);
     let hp = http_port.unwrap_or(DEFAULT_HTTP_PORT);
     let logo = include_logo.unwrap_or(true);
@@ -523,9 +531,12 @@ pub async fn studio_server_stop(state: State<'_, AppState>) -> Result<Value, Str
     let mgr = state.manager.clone();
     let srv = state.studio.server.clone();
     let settings = state.settings.clone();
+    state.pending_auto_resume.store(false, Ordering::SeqCst);
     tokio::task::spawn_blocking(move || {
         let st = srv.stop(&mgr);
-        settings.set_studio_running(None, Some(false));
+        if !settings.auto_resume_studio() {
+            settings.set_studio_running(None, Some(false));
+        }
         Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
     })
     .await

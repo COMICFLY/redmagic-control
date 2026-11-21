@@ -320,6 +320,64 @@ fn show_or_recreate_main_window(
     Ok(())
 }
 
+fn try_auto_resume_studio(
+    mgr: &DeviceManager,
+    studio: &StudioEngine,
+    settings: &SettingsStore,
+) -> bool {
+    if !settings.auto_resume_studio() {
+        return true;
+    }
+    if studio.is_rust_owned_streaming() || mgr.has_any_direct_rgb() {
+        return true;
+    }
+    let persisted = settings.studio_snapshot();
+    let want_server = persisted.was_server_running;
+    let native_cfg = if !want_server && persisted.was_streaming {
+        persisted.to_native_config()
+    } else {
+        None
+    };
+    if !want_server && native_cfg.is_none() {
+        return true;
+    }
+
+    let devs = mgr.list_devices(true);
+    let Some(kb) = devs
+        .into_iter()
+        .find(|d| d.kind == "keyboard" && d.supports_config)
+    else {
+        return false;
+    };
+
+    if want_server {
+        studio
+            .server
+            .start(
+                mgr.clone(),
+                kb.id,
+                persisted.udp_port,
+                persisted.http_port,
+                persisted.include_logo,
+            )
+            .is_ok()
+    } else if let Some(cfg) = native_cfg {
+        studio
+            .runner
+            .start(
+                mgr.clone(),
+                kb.id,
+                studio.audio.clone(),
+                studio.ambilight.clone(),
+                studio.keys.clone(),
+                cfg,
+            )
+            .is_ok()
+    } else {
+        true
+    }
+}
+
 fn main() {
     install_panic_logger();
     let args: Vec<String> = std::env::args().collect();
@@ -384,6 +442,7 @@ fn main() {
     let manager = DeviceManager::new(force_mock);
     let studio = StudioEngine::new();
     let settings = SettingsStore::load(force_mock);
+    settings.refresh_autostart_path_if_enabled();
     let launched_autostart = args.iter().any(|a| a == "--autostart");
     let monitor_mgr = manager.clone();
     let setup_mgr = manager.clone();
@@ -400,12 +459,22 @@ fn main() {
     let headless_shot = std::env::var("REDMAGIC_VIEW")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
+    let initial_want_resume = !force_mock
+        && !headless_shot
+        && settings.auto_resume_studio()
+        && {
+            let p = settings.studio_snapshot();
+            p.was_server_running || (p.was_streaming && p.to_native_config().is_some())
+        };
+    let pending_auto_resume = Arc::new(AtomicBool::new(initial_want_resume));
+    let setup_pending_resume = pending_auto_resume.clone();
 
     tauri::Builder::default()
         .manage(AppState {
             manager,
             studio,
             settings,
+            pending_auto_resume,
         })
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -461,6 +530,7 @@ fn main() {
                 let menu_mgr = setup_mgr.clone();
                 let menu_studio = setup_studio.clone();
                 let menu_settings = setup_settings.clone();
+                let menu_pending = setup_pending_resume.clone();
                 let menu_fq = setup_force_quit.clone();
 
                 let mut tray_builder = TrayIconBuilder::with_id("main-tray")
@@ -503,11 +573,14 @@ fn main() {
                             );
                         }
                         "stop_stream" => {
+                            menu_pending.store(false, Ordering::SeqCst);
                             menu_studio.runner.stop(&menu_mgr);
                             menu_studio.server.stop(&menu_mgr);
                             menu_studio.set_sensors(false, false, false);
                             menu_mgr.stop_all_direct_rgb();
-                            menu_settings.set_studio_running(Some(false), Some(false));
+                            if !menu_settings.auto_resume_studio() {
+                                menu_settings.set_studio_running(Some(false), Some(false));
+                            }
                             let _ = app_handle.emit(
                                 "studio:stopped",
                                 serde_json::json!({ "source": "tray" }),
@@ -529,57 +602,52 @@ fn main() {
             }
 
             let handle = app.handle().clone();
+            let evt_mgr = setup_mgr.clone();
+            let evt_studio = setup_studio.clone();
+            let evt_settings = setup_settings.clone();
+            let evt_pending = setup_pending_resume.clone();
+            let evt_resume_busy = Arc::new(AtomicBool::new(false));
             monitor_mgr.start_monitor(move |evt| {
-                let _ = handle.emit("device:event", evt);
-            });
-
-            // 若开启「启动时自动恢复上次推流」且上次退出前正在运行原生推流或外部控灯服务，
-            // 在后台静默等待键盘就绪并直接恢复（开机 --autostart 静默进托盘时也能零窗口自动点亮）。
-            if !force_mock && !headless_shot && setup_settings.auto_resume_studio() {
-                let persisted = setup_settings.studio_snapshot();
-                let want_server = persisted.was_server_running;
-                let native_cfg = if !want_server && persisted.was_streaming {
-                    persisted.to_native_config()
-                } else {
-                    None
-                };
-                if want_server || native_cfg.is_some() {
-                    let resume_mgr = setup_mgr.clone();
-                    let resume_studio = setup_studio.clone();
+                let _ = handle.emit("device:event", evt.clone());
+                // 若开机阶段键盘尚未就绪（如 2.4G 休眠或延迟插入），待热插拔/唤醒上线后立刻自动恢复固定推流
+                if evt_pending.load(Ordering::SeqCst)
+                    && !evt_resume_busy.swap(true, Ordering::SeqCst)
+                {
+                    let m = evt_mgr.clone();
+                    let s = evt_studio.clone();
+                    let st = evt_settings.clone();
+                    let p = evt_pending.clone();
+                    let b = evt_resume_busy.clone();
                     std::thread::spawn(move || {
-                        for _ in 0..6 {
-                            std::thread::sleep(std::time::Duration::from_millis(600));
-                            if resume_studio.is_rust_owned_streaming() {
-                                return;
-                            }
-                            let devs = resume_mgr.list_devices(true);
-                            if let Some(kb) = devs
-                                .into_iter()
-                                .find(|d| d.kind == "keyboard" && d.supports_config)
-                            {
-                                if want_server {
-                                    let _ = resume_studio.server.start(
-                                        resume_mgr,
-                                        kb.id,
-                                        persisted.udp_port,
-                                        persisted.http_port,
-                                        persisted.include_logo,
-                                    );
-                                } else if let Some(cfg) = native_cfg {
-                                    let _ = resume_studio.runner.start(
-                                        resume_mgr,
-                                        kb.id,
-                                        resume_studio.audio.clone(),
-                                        resume_studio.ambilight.clone(),
-                                        resume_studio.keys.clone(),
-                                        cfg,
-                                    );
-                                }
-                                return;
-                            }
+                        if p.load(Ordering::SeqCst) && try_auto_resume_studio(&m, &s, &st) {
+                            p.store(false, Ordering::SeqCst);
                         }
+                        b.store(false, Ordering::SeqCst);
                     });
                 }
+            });
+
+            // 启动 / 开机静默自启自动恢复固定推流：
+            // 渐进重试约 30 秒以等待 Windows 登录期 USB / 2.4G 接收器枚举就绪，失败不提前放弃；
+            // 若期间仍处于休眠，后续键盘一旦按键唤醒即由上方设备监听自动点亮。
+            if setup_pending_resume.load(Ordering::SeqCst) {
+                let resume_mgr = setup_mgr.clone();
+                let resume_studio = setup_studio.clone();
+                let resume_settings = setup_settings.clone();
+                let resume_pending = setup_pending_resume.clone();
+                std::thread::spawn(move || {
+                    let waits = [500u64, 1000, 1500, 2000, 2500, 3000, 3000, 3000, 5000, 5000, 5000];
+                    for ms in waits {
+                        std::thread::sleep(std::time::Duration::from_millis(ms));
+                        if !resume_pending.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        if try_auto_resume_studio(&resume_mgr, &resume_studio, &resume_settings) {
+                            resume_pending.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                    }
+                });
             }
             Ok(())
         })
