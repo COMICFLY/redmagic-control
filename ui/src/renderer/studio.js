@@ -5,9 +5,7 @@
  * 4. 本地外部控灯桥（127.0.0.1 UDP 27650 + HTTP / WebSocket 27651）监控与示例 */
 
 import { KB_STAGE } from "./kb-layout.js";
-
-const KB_CROP = { x: 92, y: 4, w: 680, h: 248 };
-const KB_TOP_OFFSET = 30;
+import { KB_CROP, KB_TOP_OFFSET, drawKeyboardLedCanvas } from "./stage.js";
 
 // 预计算 100 颗实体按键的物理归一化坐标 (x, y) 与 hwSlot，供 60fps 零分配渲染
 export const STUDIO_KEYS = KB_STAGE.keys.map((k) => {
@@ -353,8 +351,11 @@ while True:
 export class StudioController {
   constructor() {
     this.rafId = null;
+    this.previewTimer = null;
     this.bgTimer = null;
     this.root = null;
+    this.kbCtx = null;
+    this.showKeys = true;
     this.getState = null;
     this.bgGetState = null;
     this.bgOnStats = null;
@@ -368,12 +369,9 @@ export class StudioController {
     this.pushInFlight = false;
     this.lastTelemTs = 0;
     this.telemInFlight = false;
-    this.lastPreviewTs = 0;
     this.fpsCount = 0;
     this.fpsWindowStart = performance.now();
     this.t0 = performance.now();
-    this.ledNodes = [];
-    this.logoNodes = [];
     this.onStatsUpdate = null;
   }
 
@@ -402,36 +400,59 @@ export class StudioController {
     this.root = root;
     this.getState = getState;
     this.onStatsUpdate = onStatsUpdate;
-    this.ledNodes = Array.from(root.querySelectorAll(".kb-led[data-slot]")).map((el) => ({
-      el,
-      slot: Number(el.dataset.slot),
-    }));
-    this.logoNodes = Array.from(root.querySelectorAll(".logo-seg"));
-    this.tick();
+    const canvas = root.querySelector(".kb-led-canvas");
+    this.kbCtx = canvas ? canvas.getContext("2d") : null;
+    this.showKeys = canvas ? canvas.dataset.showKeys !== "0" : true;
+    this.repaintNow();
+    this._schedulePreview();
   }
 
-  // 仅分离 DOM 预览循环，绝不中断正在后台运行的真机 RAM 推流定时器
+  // 仅分离前台 Canvas 预览循环，绝不中断正在后台运行的真机 RAM 推流定时器
   detach() {
+    if (this.previewTimer) {
+      clearTimeout(this.previewTimer);
+      this.previewTimer = null;
+    }
     if (this.rafId) {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
     this.root = null;
-    this.ledNodes = [];
-    this.logoNodes = [];
+    this.kbCtx = null;
   }
 
-  // 后台独立定时器（16ms 节拍避免与 32ms 门限混叠）：在切页、切设备、最小化或托盘挂起时持续 30 FPS / 8 FPS 稳帧推流
+  // 立即重绘单帧（供静态逐键涂色模式在拖拽/套用模板/读取硬件后即时刷新）
+  repaintNow() {
+    if (!this.root || !this.getState || !this.kbCtx) return;
+    const { studio, dev } = this.getState();
+    if (!studio || !dev) return;
+    const now = performance.now();
+    const t = (now - this.t0) / 1000;
+    this._computeFrame(studio, t, studio.subMode, this.keysBuf, this.logoBuf);
+    this._paintCanvas();
+  }
+
+  // 自适应后台循环：
+  // - 原生引擎 / 外部服务接管时低频刷新状态（450ms），不空转 16ms 定时器；
+  // - 自定义 JS 脚本推流时自动切回 16ms（有线 30 FPS）/ 62ms（2.4G 8 FPS）高精节拍。
   ensureBackgroundLoop(getState, onStatsUpdate) {
     this.bgGetState = getState;
     this.bgOnStats = onStatsUpdate;
     if (this.bgTimer !== null) return;
-    this.bgTimer = setInterval(() => this._backgroundStep(), 16);
+    this._scheduleBgStep(16);
+  }
+
+  _scheduleBgStep(delayMs) {
+    if (this.bgTimer !== null) clearTimeout(this.bgTimer);
+    this.bgTimer = setTimeout(() => {
+      this.bgTimer = null;
+      this._backgroundStep();
+    }, delayMs);
   }
 
   stopBackgroundLoop() {
     if (this.bgTimer !== null) {
-      clearInterval(this.bgTimer);
+      clearTimeout(this.bgTimer);
       this.bgTimer = null;
     }
     this.fpsCount = 0;
@@ -666,48 +687,47 @@ export class StudioController {
     }
   }
 
-  _paintDom() {
-    for (let i = 0; i < this.ledNodes.length; i++) {
-      const { el, slot } = this.ledNodes[i];
-      const o = slot * 3;
-      const r = this.keysBuf[o], g = this.keysBuf[o + 1], b = this.keysBuf[o + 2];
-      if ((r | g | b) === 0) {
-        el.style.opacity = "0.06";
-        el.style.color = "rgb(40,44,56)";
-      } else {
-        el.style.opacity = "0.95";
-        el.style.color = `rgb(${r},${g},${b})`;
-      }
-    }
-    const nLogo = this.logoNodes.length;
-    if (nLogo > 0) {
-      for (let i = 0; i < nLogo; i++) {
-        const li = Math.min(LOGO_LED_COUNT - 1, Math.floor((i * LOGO_LED_COUNT) / nLogo));
-        const r = this.logoBuf[li * 3], g = this.logoBuf[li * 3 + 1], b = this.logoBuf[li * 3 + 2];
-        const seg = this.logoNodes[i];
+  _paintCanvas() {
+    if (!this.kbCtx) return;
+    const keysBuf = this.keysBuf;
+    const logoBuf = this.logoBuf;
+    drawKeyboardLedCanvas(
+      this.kbCtx,
+      this.showKeys,
+      (k) => {
+        const o = k.slot * 3;
+        const r = keysBuf[o], g = keysBuf[o + 1], b = keysBuf[o + 2];
         if ((r | g | b) === 0) {
-          seg.style.opacity = "0.08";
-          seg.style.color = "rgb(40,44,56)";
-        } else {
-          seg.style.opacity = "0.95";
-          seg.style.color = `rgb(${r},${g},${b})`;
+          return { color: "rgb(48,52,66)", op: 0.16, fillAlpha: 0.04 };
         }
-      }
-    }
+        return { color: `rgb(${r},${g},${b})`, op: 0.9, fillAlpha: 0.28 };
+      },
+      (i, total) => {
+        const li = Math.min(LOGO_LED_COUNT - 1, Math.floor((i * LOGO_LED_COUNT) / total));
+        const o = li * 3;
+        const r = logoBuf[o], g = logoBuf[o + 1], b = logoBuf[o + 2];
+        if ((r | g | b) === 0) {
+          return { color: "rgb(48,52,66)", op: 0.12 };
+        }
+        return { color: `rgb(${r},${g},${b})`, op: 0.92 };
+      },
+    );
   }
 
   _pollTelemetryIfNeeded(studio, now, onStats, minIntervalMs = 45) {
-    const needTelem =
+    const needFastSensor =
       studio.subMode === "api" ||
       studio.serverStatus?.running ||
-      studio.nativeStreaming ||
       studio.telemetry.audio?.active ||
       studio.telemetry.ambilight?.active ||
       studio.telemetry.keys?.active ||
       (studio.subMode === "layers" && (studio.layers.audio.enabled || studio.layers.ambilight.enabled || studio.layers.typing.enabled)) ||
       (studio.subMode === "script" && (studio.scriptId === "spectrum" || studio.scriptId === "ambilight" || studio.scriptId === "ripple"));
+    const needStatsOnly = Boolean(studio.nativeStreaming);
+    if (!needFastSensor && !needStatsOnly) return;
 
-    if (needTelem && !this.telemInFlight && now - this.lastTelemTs >= minIntervalMs && window.rm?.pollStudioTelemetry) {
+    const effectiveGap = needFastSensor ? minIntervalMs : Math.max(minIntervalMs, 450);
+    if (!this.telemInFlight && now - this.lastTelemTs >= effectiveGap && window.rm?.pollStudioTelemetry) {
       this.telemInFlight = true;
       this.lastTelemTs = now;
       window.rm.pollStudioTelemetry().then((res) => {
@@ -730,7 +750,7 @@ export class StudioController {
   }
 
   _pushFrameToHw(studio, dev, hw, now, onStats) {
-    // 纯 Rust 原生引擎或外部 API 运行时，由 Rust 线程直接写入 HID，前端零逐帧 IPC
+    // 原生后台引擎或外部 API 运行时，由后台线程直接写入 HID，前端零逐帧 IPC
     if (!studio.streaming || studio.nativeStreaming || studio.serverStatus?.running || !dev || !window.rm?.streamRgbFrame) return;
     const is24g = (hw?.connectionMode || dev.connectionMode) === "2.4g";
     const intervalMs = is24g ? 124 : 31; // 有线 ~30 FPS / 2.4G ~8 FPS（与 16ms 节拍对齐不混叠）
@@ -760,9 +780,9 @@ export class StudioController {
     });
   }
 
-  // 独立后台循环：
-  // - 纯 Rust 原生推流时仅低频刷新侧边栏 FPS（500ms），0 帧推送开销；
-  // - 手写自定义 JS 脚本推流时在切页/托盘隐藏期间维持 30 FPS / 8 FPS 推送（且零 DOM 绘制）。
+  // 自适应后台循环：
+  // - 原生推流时仅低频刷新侧边栏 FPS（450ms），隐藏时完全休眠；
+  // - 手写自定义 JS 脚本推流时维持 30 FPS（有线）/ 8 FPS（2.4G）稳定推送。
   _backgroundStep() {
     if (!this.bgGetState) return;
     const { studio, dev, hw } = this.bgGetState();
@@ -773,9 +793,9 @@ export class StudioController {
     }
     const now = performance.now();
     const isRustOwned = studio.nativeStreaming || studio.serverStatus?.running;
-    const pollGap = isRustOwned ? (this.root ? 120 : 500) : 45;
-    if (!document.hidden && !document.body.classList.contains("is-tray-hidden")) {
-      this._pollTelemetryIfNeeded(studio, now, this.bgOnStats, pollGap);
+    const isHidden = document.hidden || document.body.classList.contains("is-tray-hidden");
+    if (!isHidden) {
+      this._pollTelemetryIfNeeded(studio, now, this.bgOnStats, isRustOwned ? 450 : 45);
     } else if (!isRustOwned) {
       // 自定义 JS 在托盘隐藏状态下仍需拉取音频/屏幕/按键传感器数据
       this._pollTelemetryIfNeeded(studio, now, this.bgOnStats, 45);
@@ -783,25 +803,37 @@ export class StudioController {
     if (studio.streaming && !isRustOwned && dev) {
       this._pushFrameToHw(studio, dev, hw, now, this.bgOnStats);
     }
+    const is24g = (hw?.connectionMode || dev?.connectionMode) === "2.4g";
+    const nextDelay = isRustOwned ? (isHidden ? 800 : 450) : (is24g ? 60 : 16);
+    this._scheduleBgStep(nextDelay);
   }
 
-  // 前台 30fps 舞台预览循环（匹配键盘 30FPS 推流速率，避免 60FPS 过度触发毛玻璃 GPU 合成）
-  tick() {
-    if (!this.root || !this.getState) return;
-    if (document.hidden || document.body.classList.contains("is-tray-hidden")) {
-      this.rafId = null;
-      return;
-    }
-    const now = performance.now();
-    if (now - this.lastPreviewTs >= 32) {
-      this.lastPreviewTs = now;
-      const { studio, dev } = this.getState();
-      if (!studio || !dev) return;
-      this._pollTelemetryIfNeeded(studio, now, this.onStatsUpdate, 50);
-      const t = (now - this.t0) / 1000;
-      this._computeFrame(studio, t, studio.subMode, this.keysBuf, this.logoBuf);
-      this._paintDom();
-    }
-    this.rafId = requestAnimationFrame(() => this.tick());
+  // 前台轻量 Canvas 舞台预览调度：
+  // - 静态逐键涂色模式完全不轮询（0% CPU），由交互事件触发 repaintNow()；
+  // - 动态脚本/多图层/外部模式按需在帧间休眠（聚焦 ~20fps / 失焦 ~5fps），零空转 rAF。
+  _schedulePreview() {
+    if (!this.root || !this.getState || !this.kbCtx) return;
+    if (document.hidden || document.body.classList.contains("is-tray-hidden")) return;
+    const { studio } = this.getState();
+    if (!studio || studio.subMode === "paint") return;
+
+    const gap = document.hasFocus() ? 50 : 200;
+    this.previewTimer = setTimeout(() => {
+      this.previewTimer = null;
+      if (!this.root || !this.getState || !this.kbCtx) return;
+      if (document.hidden || document.body.classList.contains("is-tray-hidden")) return;
+      this.rafId = requestAnimationFrame((now) => {
+        this.rafId = null;
+        if (!this.root || !this.getState || !this.kbCtx) return;
+        if (document.hidden || document.body.classList.contains("is-tray-hidden")) return;
+        const { studio: st, dev } = this.getState();
+        if (!st || !dev) return;
+        this._pollTelemetryIfNeeded(st, now, this.onStatsUpdate, 65);
+        const t = (now - this.t0) / 1000;
+        this._computeFrame(st, t, st.subMode, this.keysBuf, this.logoBuf);
+        this._paintCanvas();
+        this._schedulePreview();
+      });
+    }, gap);
   }
 }

@@ -93,6 +93,12 @@ const state = {
       modalOpen: false,
       autoCheck: localStorage.getItem("rm_auto_update") !== "0",
     },
+    settings: {
+      closeToTray: true,
+      startMinimized: true,
+      autoCheckUpdate: true,
+      autostart: false,
+    },
   },
   busy: false,
 };
@@ -246,12 +252,8 @@ function renderRailStreamCard() {
     : (st.streamFps || (is24g ? 8 : 30));
   const title = st.serverStatus?.running
     ? "外部控灯桥运行中"
-    : st.nativeStreaming
-      ? "纯 Rust 后台推流"
-      : "JS 脚本后台推流";
-  const subHint = (st.nativeStreaming || st.serverStatus?.running)
-    ? `${studioSourceLabel(st)} · 挂起零浏览器占用`
-    : `${studioSourceLabel(st)} · 支持托盘挂起`;
+    : "灯效后台推流中";
+  const subHint = `${studioSourceLabel(st)} · 支持托盘挂起`;
 
   card.hidden = false;
   card.innerHTML = `
@@ -457,6 +459,7 @@ async function loadPaintGroupFromHw(group, { forceOverwrite = true, silent = fal
       }
     }
     st.paintLoaded = true;
+    studioCtrl.repaintNow();
     if (!silent) toast("已读取板载逐键方案", `组 ${group + 1} (${hasAny ? "已加载灯色" : "当前为空白"})`);
   } catch (err) {
     if (!silent) toast("读取板载逐键方案失败", err.message, true);
@@ -534,7 +537,7 @@ function renderWorkspace() {
           </p>
         </div>
       </div>
-      ${renderAbout(state.meta, state.ui.update)}
+      ${renderAbout(state.meta, state.ui.update, state.ui.settings)}
     `;
     return;
   }
@@ -1476,6 +1479,7 @@ function bindEvents() {
     if (el.dataset.paintTpl) {
       const names = { redmagic: "红魔战甲", fps: "FPS WASD", moba: "MOBA QWER", cyber: "赛博渐变", white: "纯白极简", clear: "全黑清空" };
       applyPaintTemplate(st.paintRgb, el.dataset.paintTpl);
+      studioCtrl.repaintNow();
       toast("已套用逐键模板", names[el.dataset.paintTpl] || el.dataset.paintTpl);
       return;
     }
@@ -1618,8 +1622,8 @@ function bindEvents() {
             st.nativeStreaming = true;
             st.streamFps = 0;
             studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
-            setSyncText("纯 Rust 推流中", "is-live");
-            toast("已开启纯 Rust 零损耗推流", "挂起至托盘后自动释放浏览器进程（<0.3% CPU / ~15MB 内存）");
+            setSyncText("实时推流中", "is-live");
+            toast("已开启实时灯效推流", "支持切换页面或挂起至系统托盘后台运行");
           } else {
             await callApi("startDirectRgb", dev.id, st.includeLogo);
             st.streaming = true;
@@ -1721,6 +1725,7 @@ function bindEvents() {
     if (el.id === "studio-paint-picker") {
       st.paintColor = el.value;
       if (st.paintTool === "eraser") st.paintTool = "brush";
+      studioCtrl.repaintNow();
       return;
     }
     if (el.dataset.layerRange) {
@@ -1801,6 +1806,7 @@ function bindEvents() {
       st.paintRgb[o + 1] = g;
       st.paintRgb[o + 2] = b;
     }
+    studioCtrl.repaintNow();
   }
 
   ws.addEventListener("pointerdown", (e) => {
@@ -1936,9 +1942,42 @@ function bindEvents() {
   // 工作区委托事件（change：开关、滑块松手、颜色选择器、下拉、数值输入）
   ws.addEventListener("change", async (e) => {
     const el = e.target;
+    if (el.id === "about-close-tray-toggle") {
+      try {
+        state.ui.settings = await callApi("setSettings", { closeToTray: el.checked });
+        toast(el.checked ? "已开启关闭时挂起至托盘" : "已关闭窗口挂起", el.checked ? "点击右上角关闭将释放界面并常驻系统托盘" : "未推流时点击关闭将直接退出程序");
+      } catch (err) {
+        toast("保存设置失败", err.message, true);
+        renderWorkspace();
+      }
+      return;
+    }
+    if (el.id === "about-autostart-toggle") {
+      try {
+        state.ui.settings = await callApi("setSettings", { autostart: el.checked });
+        toast(el.checked ? "已开启 Windows 开机自启" : "已关闭开机自启", el.checked ? (state.ui.settings.startMinimized ? "登录后将静默挂起至系统托盘（零弹窗）" : "登录后将自动启动主界面") : "已从当前用户启动项移除");
+      } catch (err) {
+        toast("设置开机自启失败", err.message, true);
+        renderWorkspace();
+      }
+      return;
+    }
+    if (el.id === "about-start-min-check") {
+      try {
+        state.ui.settings = await callApi("setSettings", { startMinimized: el.checked });
+        toast(el.checked ? "开机自启将静默进托盘" : "开机自启将显示主界面");
+      } catch (err) {
+        toast("保存设置失败", err.message, true);
+        renderWorkspace();
+      }
+      return;
+    }
     if (el.id === "about-auto-update-toggle") {
       state.ui.update.autoCheck = el.checked;
       localStorage.setItem("rm_auto_update", el.checked ? "1" : "0");
+      try {
+        state.ui.settings = await callApi("setSettings", { autoCheckUpdate: el.checked });
+      } catch (_) {}
       toast(el.checked ? "已开启启动自动检查更新" : "已关闭启动自动检查更新", "随时可在「关于」手动检查");
       return;
     }
@@ -2204,6 +2243,12 @@ async function boot() {
   try {
     state.meta = await callApi("getMeta");
     $("#app-version").textContent = `v${state.meta.version}`;
+    if (window.rm?.getSettings) {
+      try {
+        state.ui.settings = await callApi("getSettings");
+        state.ui.update.autoCheck = state.ui.settings.autoCheckUpdate !== false;
+      } catch (_) {}
+    }
     state.devices = await callApi("listDevices");
     const params = new URLSearchParams(window.location.search);
     const initDev = params.get("device");
@@ -2257,7 +2302,7 @@ async function boot() {
             st.scriptSensors = { ...found.sensors };
           }
           studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);
-          setSyncText("纯 Rust 推流中", "is-live");
+          setSyncText("实时推流中", "is-live");
         } else if (srvSt?.server?.running) {
           st.serverStatus = srvSt.server;
           studioCtrl.ensureBackgroundLoop(getStudioBgState, updateStudioLiveStats);

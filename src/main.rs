@@ -3,6 +3,7 @@
 mod commands;
 mod devices;
 mod protocol;
+mod settings;
 mod studio;
 mod updater;
 
@@ -14,6 +15,7 @@ use std::sync::Arc;
 
 use commands::AppState;
 use devices::manager::DeviceManager;
+use settings::SettingsStore;
 use studio::StudioEngine;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -224,7 +226,9 @@ fn build_window_with_dir(
         .center()
         .devtools(allow_devtools)
         .zoom_hotkeys_enabled(false)
-        .additional_browser_args("--disable-background-timer-throttling")
+        .additional_browser_args(
+            "--disable-background-timer-throttling --renderer-process-limit=1 --disable-extensions --disable-background-networking --disable-component-update --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,MediaRouter,BackForwardCache",
+        )
         .effects(effects)
         .data_directory(data_dir)
         .build()
@@ -288,21 +292,18 @@ fn show_or_recreate_main_window(
         });
     }
 
-    // 推流关闭策略：
-    // 1. 纯 Rust 引擎或外部 API 运行时：直接允许关闭并销毁 WebView2（释放全部 ~300MB RAM 与 GPU 进程），
-    //    进程与托盘继续在后台以 <0.3% CPU / ~15MB 内存稳帧推流；
-    // 2. 手写自定义 JS 推流时：隐藏窗口并 SetIsVisible(false) 关闭 GPU 合成，使 GPU 占用降至 0%。
+    // 窗口关闭策略：
+    // 1. 显式退出（托盘「退出程序」）时直接退出；
+    // 2. 手写自定义 JS 脚本正在推流时：隐藏窗口并 SetIsVisible(false) 关闭 GPU 合成，使 GPU 占用降至 0%；
+    // 3. 默认挂起至托盘（closeToTray = true）或纯 Rust / 外部 API 推流时：允许 WebView2 窗口正常销毁
+    //    （释放全部 ~300MB RAM 与 6 个浏览器进程），由 RunEvent::ExitRequested 保持极简 Rust 托盘常驻。
     let win_for_close = win.clone();
     win.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
             if force_quit.load(Ordering::SeqCst) {
                 return;
             }
-            if studio.is_rust_owned_streaming() {
-                // 让 WebView2 窗口正常销毁；RunEvent::ExitRequested 会拦截退出保持托盘常驻
-                return;
-            }
-            if mgr.has_any_direct_rgb() {
+            if mgr.has_any_direct_rgb() && !studio.is_rust_owned_streaming() {
                 api.prevent_close();
                 let _ = win_for_close
                     .emit("studio:tray-hidden", serde_json::json!({ "ok": true }));
@@ -382,11 +383,15 @@ fn main() {
 
     let manager = DeviceManager::new(force_mock);
     let studio = StudioEngine::new();
+    let settings = SettingsStore::load(force_mock);
+    let launched_autostart = args.iter().any(|a| a == "--autostart");
     let monitor_mgr = manager.clone();
     let setup_mgr = manager.clone();
     let setup_studio = studio.clone();
+    let setup_settings = settings.clone();
     let exit_mgr = manager.clone();
     let exit_studio = studio.clone();
+    let exit_settings = settings.clone();
     let cleanup_mgr = manager.clone();
     let cleanup_studio = studio.clone();
     let force_quit = Arc::new(AtomicBool::new(false));
@@ -397,17 +402,24 @@ fn main() {
         .unwrap_or(false);
 
     tauri::Builder::default()
-        .manage(AppState { manager, studio })
+        .manage(AppState {
+            manager,
+            studio,
+            settings,
+        })
         .setup(move |app| {
             let app_handle = app.handle().clone();
-            show_or_recreate_main_window(
-                &app_handle,
-                force_mock,
-                true,
-                setup_mgr.clone(),
-                setup_studio.clone(),
-                setup_force_quit.clone(),
-            )?;
+            // 开机自启且启用「静默挂起至托盘」时，登录阶段不创建 WebView2 窗口（零闪烁、0 浏览器进程、极速进托盘）
+            if !(launched_autostart && setup_settings.start_minimized() && !headless_shot) {
+                show_or_recreate_main_window(
+                    &app_handle,
+                    force_mock,
+                    true,
+                    setup_mgr.clone(),
+                    setup_studio.clone(),
+                    setup_force_quit.clone(),
+                )?;
+            }
 
             // 监听单实例唤醒事件（0% CPU 内核阻塞等待），重复双击 exe 时立即重建/唤起窗口
             #[cfg(windows)]
@@ -524,6 +536,8 @@ fn main() {
             commands::app_meta,
             commands::app_check_update,
             commands::app_open_url,
+            commands::app_settings_get,
+            commands::app_settings_set,
             commands::app_hide_to_tray,
             commands::device_list,
             commands::device_rescan,
@@ -563,10 +577,12 @@ fn main() {
             match event {
                 tauri::RunEvent::ExitRequested { api, .. } => {
                     let keep_alive = !exit_force_quit.load(Ordering::SeqCst)
-                        && (exit_studio.is_rust_owned_streaming()
+                        && !headless_shot
+                        && (exit_settings.close_to_tray()
+                            || exit_studio.is_rust_owned_streaming()
                             || exit_mgr.has_any_direct_rgb());
                     if keep_alive {
-                        // 纯 Rust 托盘常驻模式：WebView2 已被销毁，保持极简 Rust 进程在托盘继续推流
+                        // 纯 Rust 托盘常驻模式：WebView2 已被销毁，保持极简 Rust 进程在托盘低占用待命/推流
                         api.prevent_exit();
                         return;
                     }

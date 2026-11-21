@@ -7,14 +7,105 @@ import { KB_STAGE } from "./kb-layout.js";
 import { icon } from "./icons.js";
 
 // GK001S 实体机身在 864×256 原图中的裁剪窗口（原图实测不透明区 97..766 × 8..247）
-const KB_CROP = { x: 92, y: 4, w: 680, h: 248 };
-const KB_TOP_OFFSET = 30; // 原布局坐标含 30px 顶部偏移
+export const KB_CROP = { x: 92, y: 4, w: 680, h: 248 };
+export const KB_TOP_OFFSET = 30; // 原布局坐标含 30px 顶部偏移
 
 // GK001S 左上边框实体 Logo 格栅灯条在 864×256 原图中的精确像素位置（实测 26 格斜栅 x=123..353, y=15..19）
-const LOGO_STRIP = { x: 123, y: 15, w: 230, h: 5, segments: 26 };
+export const LOGO_STRIP = { x: 123, y: 15, w: 230, h: 5, segments: 26 };
 
 // GK001S 右上角 320×172 彩屏在 864×256 原图中的精确像素窗口（实测 x=637..693, y=33..65）
 const MINI_SCREEN = { x: 637, y: 33, w: 57, h: 33 };
+
+// 预计算 100 颗实体按键在 680×248 Canvas 坐标系下的像素矩形与归一化坐标
+export const KB_LED_RECTS = KB_STAGE.keys.map((k) => {
+  const x = k.x - KB_CROP.x;
+  const y = k.y - KB_TOP_OFFSET - KB_CROP.y;
+  return {
+    slot: k.hwSlot,
+    x,
+    y,
+    w: k.w,
+    h: k.h,
+    nx: Math.max(0, Math.min(1, x / KB_CROP.w)),
+    ny: Math.max(0, Math.min(1, y / KB_CROP.h)),
+  };
+});
+
+// 预计算 26 段左上边框斜栅 Logo 灯条在 680×248 Canvas 坐标系下的平行四边形顶点
+export const LOGO_SEG_POLYS = (() => {
+  const n = LOGO_STRIP.segments;
+  const baseX = LOGO_STRIP.x - KB_CROP.x;
+  const baseY = LOGO_STRIP.y - KB_CROP.y;
+  const gap = LOGO_STRIP.w * 0.009;
+  const segW = (LOGO_STRIP.w - gap * (n - 1)) / n;
+  const step = segW + gap;
+  const h = LOGO_STRIP.h;
+  const skewDx = (h * 0.5) * Math.tan((42 * Math.PI) / 180);
+  const polys = [];
+  for (let i = 0; i < n; i++) {
+    const x0 = baseX + i * step;
+    const x1 = x0 + segW;
+    polys.push([
+      x0 + skewDx, baseY,
+      x1 + skewDx, baseY,
+      x1 - skewDx, baseY + h,
+      x0 - skewDx, baseY + h,
+    ]);
+  }
+  return polys;
+})();
+
+/**
+ * 单层 Canvas 渲染键盘 100 键 RGB 背光与 26 段顶部 Logo 斜栅灯条（零 DOM 节点重排/重绘）。
+ * getKeyStyle(rect, idx) -> { color, op, fillAlpha? } | null
+ * getLogoStyle(idx, total) -> { color, op } | null
+ */
+export function drawKeyboardLedCanvas(ctx, showKeys, getKeyStyle, getLogoStyle) {
+  ctx.clearRect(0, 0, KB_CROP.w, KB_CROP.h);
+
+  if (showKeys && getKeyStyle) {
+    ctx.lineWidth = 1.65;
+    const hasRoundRect = typeof ctx.roundRect === "function";
+    for (let i = 0; i < KB_LED_RECTS.length; i++) {
+      const k = KB_LED_RECTS[i];
+      const st = getKeyStyle(k, i);
+      if (!st || st.op <= 0.01) continue;
+      const rx = k.x + 1;
+      const ry = k.y + 1;
+      const rw = Math.max(2, k.w - 2);
+      const rh = Math.max(2, k.h - 2);
+      ctx.beginPath();
+      if (hasRoundRect) ctx.roundRect(rx, ry, rw, rh, 3.5);
+      else ctx.rect(rx, ry, rw, rh);
+      ctx.fillStyle = st.color;
+      ctx.globalAlpha = st.fillAlpha != null ? st.fillAlpha : st.op * 0.24;
+      ctx.fill();
+      ctx.strokeStyle = st.color;
+      ctx.globalAlpha = Math.min(1, st.op * 1.18);
+      ctx.stroke();
+    }
+  }
+
+  if (getLogoStyle) {
+    const total = LOGO_SEG_POLYS.length;
+    for (let i = 0; i < total; i++) {
+      const st = getLogoStyle(i, total);
+      if (!st || st.op <= 0.01) continue;
+      const p = LOGO_SEG_POLYS[i];
+      ctx.beginPath();
+      ctx.moveTo(p[0], p[1]);
+      ctx.lineTo(p[2], p[3]);
+      ctx.lineTo(p[4], p[5]);
+      ctx.lineTo(p[6], p[7]);
+      ctx.closePath();
+      ctx.fillStyle = st.color;
+      ctx.globalAlpha = st.op;
+      ctx.fill();
+    }
+  }
+
+  ctx.globalAlpha = 1;
+}
 
 function esc(str) {
   return String(str ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -85,13 +176,6 @@ export function renderKeyboardStage(device, hwState, { interactiveKeys = false, 
   const imgW = ((KB_STAGE.width / KB_CROP.w) * 100).toFixed(3);
   const imgH = ((KB_STAGE.height / KB_CROP.h) * 100).toFixed(3);
 
-  // 顶部 Logo 灯条精准覆盖实体左上格栅
-  const lsLeft = (((LOGO_STRIP.x - KB_CROP.x) / KB_CROP.w) * 100).toFixed(3);
-  const lsTop = (((LOGO_STRIP.y - KB_CROP.y) / KB_CROP.h) * 100).toFixed(3);
-  const lsW = ((LOGO_STRIP.w / KB_CROP.w) * 100).toFixed(3);
-  const lsH = ((LOGO_STRIP.h / KB_CROP.h) * 100).toFixed(3);
-  const logoSegsHtml = Array.from({ length: LOGO_STRIP.segments }, () => '<i class="logo-seg"></i>').join("");
-
   // 右上角实体小屏画面同步叠加层
   const scLeft = (((MINI_SCREEN.x - KB_CROP.x) / KB_CROP.w) * 100).toFixed(3);
   const scTop = (((MINI_SCREEN.y - KB_CROP.y) / KB_CROP.h) * 100).toFixed(3);
@@ -100,22 +184,6 @@ export function renderKeyboardStage(device, hwState, { interactiveKeys = false, 
   const miniScreenHtml = screenDataUrl
     ? `<img class="kb-mini-screen" src="${esc(screenDataUrl)}" alt="小屏预览" draggable="false" style="left:${scLeft}%;top:${scTop}%;width:${scW}%;height:${scH}%" />`
     : "";
-
-  // 逐键 LED 灯光层（100 键独立精准对齐每个键帽）
-  let ledLayerHtml = "";
-  if (showLightPreview) {
-    ledLayerHtml = KB_STAGE.keys.map((k) => {
-      const lx = k.x - KB_CROP.x;
-      const ly = k.y - KB_TOP_OFFSET - KB_CROP.y;
-      const left = ((lx / KB_CROP.w) * 100).toFixed(3);
-      const top = ((ly / KB_CROP.h) * 100).toFixed(3);
-      const width = ((k.w / KB_CROP.w) * 100).toFixed(3);
-      const height = ((k.h / KB_CROP.h) * 100).toFixed(3);
-      const nx = Math.max(0, Math.min(1, lx / KB_CROP.w)).toFixed(3);
-      const ny = Math.max(0, Math.min(1, ly / KB_CROP.h)).toFixed(3);
-      return `<span class="kb-led" data-slot="${k.hwSlot}" data-nx="${nx}" data-ny="${ny}" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%"></span>`;
-    }).join("");
-  }
 
   // 交互式键位映射热点层（点击改键）或逐键涂色热区（拖拽涂色）
   let hitLayerHtml = "";
@@ -153,8 +221,7 @@ export function renderKeyboardStage(device, hwState, { interactiveKeys = false, 
     <div class="stage-box${large ? " is-large" : ""}">
       <div class="stage-kb-crop${large ? " is-large" : ""}">
         <img class="stage-kb-img" src="${esc(device.image)}" alt="${esc(device.name)}" draggable="false" style="left:${imgLeft}%;top:${imgTop}%;width:${imgW}%;height:${imgH}%" />
-        ${showLightPreview ? `<div class="kb-led-layer" aria-hidden="true">${ledLayerHtml}</div>` : ""}
-        <div class="kb-logo-strip" style="left:${lsLeft}%;top:${lsTop}%;width:${lsW}%;height:${lsH}%" aria-hidden="true">${logoSegsHtml}</div>
+        <canvas class="kb-led-canvas" width="${KB_CROP.w}" height="${KB_CROP.h}" data-show-keys="${showLightPreview ? 1 : 0}" aria-hidden="true"></canvas>
         ${miniScreenHtml}
         ${hitLayerHtml}
       </div>
@@ -186,32 +253,27 @@ export function renderMouseStage(device, hwState, meta, { interactiveKeys = fals
     return `<button type="button" class="ms-pin mono${isSel ? " is-selected" : ""}${isMod ? " is-modified" : ""}" data-select-slot="${s.slot}" style="left:${s.x}%;top:${s.y}%" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${isSel}">${esc(s.code)}</button>`;
   }).join("") : "";
 
-  // 鼠标三处真实透光灯区（按 179×300 原图实测像素绘制矢量灯罩：滚轮 / 中段 V 型双翼 / 尾部红魔标）
+  // 鼠标三处真实透光灯区（使用双层矢量光晕替代昂贵的 feGaussianBlur 滤镜，保持清晰透光质感）
   const ledZonesHtml = showLightPreview ? `
     <svg class="ms-led-layer" viewBox="0 0 179 300" aria-hidden="true">
-      <defs>
-        <filter id="ms-led-glow" x="-40%" y="-40%" width="180%" height="180%">
-          <feGaussianBlur stdDeviation="2.6" result="blur" />
-          <feMerge>
-            <feMergeNode in="blur" />
-            <feMergeNode in="SourceGraphic" />
-          </feMerge>
-        </filter>
-      </defs>
       <!-- 1. 滚轮两侧透光缝（x=81..99, y=32..72） -->
-      <g class="ms-led-zone ms-led-wheel" filter="url(#ms-led-glow)">
+      <g class="ms-led-zone ms-led-wheel">
+        <rect x="79.5" y="31.5" width="6.2" height="41" rx="3.1" fill="var(--zone-color)" fill-opacity="0.28" />
+        <rect x="95.3" y="31.5" width="6.2" height="41" rx="3.1" fill="var(--zone-color)" fill-opacity="0.28" />
         <rect x="81" y="33" width="3.2" height="38" rx="1.6" fill="var(--zone-color)" />
         <rect x="96.8" y="33" width="3.2" height="38" rx="1.6" fill="var(--zone-color)" />
-        <rect x="84.5" y="36" width="12" height="32" rx="4" fill="var(--zone-color)" fill-opacity="0.38" />
+        <rect x="84.5" y="36" width="12" height="32" rx="4" fill="var(--zone-color)" fill-opacity="0.34" />
       </g>
       <!-- 2. 中段左右 V 型导光条（实测红魔导光槽 38,135 -> 78,154 与 143,135 -> 103,154） -->
-      <g class="ms-led-zone ms-led-wing" filter="url(#ms-led-glow)">
+      <g class="ms-led-zone ms-led-wing">
+        <path d="M 38 135.5 L 77 154" stroke="var(--zone-color)" stroke-width="8.5" stroke-opacity="0.26" stroke-linecap="round" fill="none" />
+        <path d="M 143 135.5 L 104 154" stroke="var(--zone-color)" stroke-width="8.5" stroke-opacity="0.26" stroke-linecap="round" fill="none" />
         <path d="M 38 135.5 L 77 154" stroke="var(--zone-color)" stroke-width="4.2" stroke-linecap="round" fill="none" />
         <path d="M 143 135.5 L 104 154" stroke="var(--zone-color)" stroke-width="4.2" stroke-linecap="round" fill="none" />
       </g>
       <!-- 3. 尾部红魔 Logo 徽标（实测亮区 bbox x=79..102, y=240..266） -->
-      <g class="ms-led-zone ms-led-logo" filter="url(#ms-led-glow)">
-        <path d="M 80 245 L 86 241 L 89 250 L 92 250 L 95 241 L 101 245 L 98 257 L 90.5 266 L 83 257 Z" fill="var(--zone-color)" />
+      <g class="ms-led-zone ms-led-logo">
+        <path d="M 80 245 L 86 241 L 89 250 L 92 250 L 95 241 L 101 245 L 98 257 L 90.5 266 L 83 257 Z" fill="var(--zone-color)" stroke="var(--zone-color)" stroke-width="3.6" stroke-opacity="0.28" stroke-linejoin="round" />
       </g>
     </svg>` : "";
 

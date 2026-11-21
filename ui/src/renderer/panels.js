@@ -1186,8 +1186,8 @@ function formatReleaseNotes(md) {
   return out.join("");
 }
 
-export function renderAbout(meta, update) {
-  const version = meta?.version || "0.5.0";
+export function renderAbout(meta, update, settings) {
+  const version = meta?.version || "0.6.0";
   const author = meta?.author || "COMICFLY";
   const authorUrl = meta?.authorUrl || "https://github.com/COMICFLY";
   const repoUrl = meta?.repoUrl || "https://github.com/COMICFLY/redmagic-control";
@@ -1197,7 +1197,11 @@ export function renderAbout(meta, update) {
   const checking = Boolean(update?.checking);
   const info = update?.info || null;
   const err = update?.error || "";
-  const autoCheck = update?.autoCheck !== false;
+  const cfg = settings || { closeToTray: true, startMinimized: true, autoCheckUpdate: true, autostart: false };
+  const autoCheck = cfg.autoCheckUpdate !== false;
+  const closeToTray = cfg.closeToTray !== false;
+  const autostart = Boolean(cfg.autostart);
+  const startMinimized = cfg.startMinimized !== false;
 
   let statusClass = "is-idle";
   let statusIcon = "info";
@@ -1229,12 +1233,12 @@ export function renderAbout(meta, update) {
 
   const notesHtml = info?.releaseNotes
     ? formatReleaseNotes(info.releaseNotes)
-    : `<h4>REDMAGIC Control v${esc(version)} 核心特性</h4>
+    : `<h4>REDMAGIC Control v${esc(version)} 功能概览</h4>
        <ul>
-         <li><strong>纯 Rust + Tauri v2</strong>：移除 Node.js / Electron / C hidapi，单文件独立运行约 9.4 MB。</li>
-         <li><strong>全三模底层通信</strong>：Win32 Overlapped HID + 2.4G 24B 分包唤醒 + SetupAPI 蓝牙 BLE 电量。</li>
-         <li><strong>灯效编程工作室</strong>：板载逐键涂色 (OP 0x0a/0x0b) + 纯 Rust 零 WebView2 托盘挂起推流 (OP 0x12/0x28)。</li>
-         <li><strong>320×172 小屏与在线更新</strong>：彩屏壁纸裁切烧录 (0xCE0000) + 原生 WinHTTP 自动更新提醒。</li>
+         <li><strong>三模设备管理</strong>：支持 GK001S 键盘与 GS001S 鼠标的 USB 有线、2.4G 无线与蓝牙连接状态及电量监控。</li>
+         <li><strong>性能与改键</strong>：回报率、DPI 档位、LOD 静默高度调节，以及全键位功能映射与出厂默认恢复。</li>
+         <li><strong>灯效编程工作室</strong>：支持 4 组板载逐键涂色 (OP 0x0a/0x0b)、实时灯效推流 (OP 0x12/0x28)、音律/屏幕联动与本地 UDP/WS 接口。</li>
+         <li><strong>小屏与常驻托盘</strong>：320×172 彩屏图片裁切上传、开机自启、关闭自动挂起至系统托盘及在线检查更新。</li>
        </ul>`;
 
   return `
@@ -1247,12 +1251,12 @@ export function renderAbout(meta, update) {
               <h2 class="about-app-name">REDMAGIC Control</h2>
               <span class="conn-badge is-wired mono">v${esc(version)}</span>
             </div>
-            <p class="card-desc">红魔氘锋外设轻量原生桌面控制中心 · 开源免安装单文件</p>
+            <p class="card-desc">红魔外设桌面控制中心</p>
             <div class="about-tech-pills mono">
-              <span class="chip">Pure Rust</span>
-              <span class="chip">Tauri v2</span>
-              <span class="chip">Win32 Native HID / BLE</span>
-              <span class="chip">Zero Telemetry</span>
+              <span class="chip">GK001S 键盘</span>
+              <span class="chip">GS001S 鼠标</span>
+              <span class="chip">三模连接</span>
+              <span class="chip">灯效编程</span>
             </div>
           </div>
         </div>
@@ -1319,12 +1323,36 @@ export function renderAbout(meta, update) {
           `}
         </div>
 
-        <div class="toggle-row about-auto-row">
-          <div class="toggle-copy">
-            <strong>启动时自动检查更新</strong>
-            <small>每次打开软件后在后台静默检查 GitHub 最新版本并弹窗提示</small>
+        <div class="about-prefs-box">
+          <div class="toggle-row is-compact">
+            <div class="toggle-copy">
+              <strong>关闭窗口时挂起至系统托盘</strong>
+              <small>默认开启 · 释放浏览器进程以极低占用常驻托盘，右键托盘可退出</small>
+            </div>
+            ${toggleSwitch("about-close-tray", closeToTray, 'id="about-close-tray-toggle"')}
           </div>
-          ${toggleSwitch("about-auto-update", autoCheck, 'id="about-auto-update-toggle"')}
+
+          <div class="toggle-row is-compact">
+            <div class="toggle-copy">
+              <div class="about-toggle-head">
+                <strong>开机自动启动</strong>
+                <label class="studio-check about-inline-check" title="随 Windows 启动后直接静默驻留系统托盘，不弹出主窗口">
+                  <input type="checkbox" id="about-start-min-check"${startMinimized ? " checked" : ""} />
+                  <span>静默进托盘</span>
+                </label>
+              </div>
+              <small>写入当前用户 Windows 启动项 (HKCU\\Run)，无需管理员权限</small>
+            </div>
+            ${toggleSwitch("about-autostart", autostart, 'id="about-autostart-toggle"')}
+          </div>
+
+          <div class="toggle-row is-compact">
+            <div class="toggle-copy">
+              <strong>启动时自动检查更新</strong>
+              <small>后台静默检测 GitHub 最新版本并在发现更新时弹窗提示</small>
+            </div>
+            ${toggleSwitch("about-auto-update", autoCheck, 'id="about-auto-update-toggle"')}
+          </div>
         </div>
 
         <div class="stack-sm about-notes-wrap">

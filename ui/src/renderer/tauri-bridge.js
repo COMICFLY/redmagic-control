@@ -37,6 +37,8 @@
     getMeta: () => safeInvoke("app_meta"),
     checkUpdate: () => safeInvoke("app_check_update"),
     openUrl: (url) => safeInvoke("app_open_url", { url }),
+    getSettings: () => safeInvoke("app_settings_get"),
+    setSettings: (patch) => safeInvoke("app_settings_set", { patch }),
     listDevices: () => safeInvoke("device_list"),
     rescanDevices: () => safeInvoke("device_rescan"),
     wakeDevice: (id) => safeInvoke("device_wake", { id }),

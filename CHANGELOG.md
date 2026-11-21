@@ -5,6 +5,25 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-21
+
+### Added
+- **Default-on close-to-tray suspension (`closeToTray: true`)**: Closing the window now suspends directly to the Windows System Tray by default (destroying WebView2 to release all browser processes and ~300 MB RAM while idling at ~0% CPU), configurable in **关于软件**. Right-clicking the tray icon and choosing `退出程序` exits completely.
+- **Native Windows Startup / Autostart (`src/settings.rs`)**: Win32 Registry (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) toggle paired with `静默进托盘` (`--autostart`, enabled by default), booting straight into the Windows System Tray with `0.00%` CPU, `12.4 MB` working set (`2.1 MB` private RAM), zero window flash, and `0` WebView2 processes.
+- **Persistent preferences (`%LOCALAPPDATA%\com.redmagic.control.rs\settings.json`)**: Saves close-to-tray, silent autostart, and auto-update preferences across restarts.
+
+### Performance & Docs
+- **Major foreground CPU (-94% to -97%) & RAM (-207 to -235 MB) optimization**:
+  - Replaced 126 animated keyboard LED/Logo DOM nodes (`.kb-led` × 100 + `.logo-seg` × 26) with a single hardware-aligned `680×248` `<canvas>` layer (`drawKeyboardLedCanvas` in `stage.js`, `lighting.js`, `studio.js`).
+  - Eliminated 40+ nested CSS `backdrop-filter` blur passes on top of Windows 11 DWM Acrylic (`tokens.css`) and replaced mouse SVG `feGaussianBlur` with lightweight dual-halo vector paths.
+  - Replaced spinning `requestAnimationFrame` throttle loops with sleep-between-frames scheduling (`setTimeout` + `rAF`), eliminated idle polling on static `paint` mode (0% CPU), switched background loop from fixed `16 ms` to adaptive `450–800 ms` when native streaming is active, and pruned unused WebView2 subsystems (`--renderer-process-limit=1 --disable-extensions --disable-background-networking --disable-component-update`).
+  - Measured foreground results (12-core Windows 11, 8s active window):
+    - Keyboard Overview (Wave): **8.11% → 0.43% CPU (-94.7%)**, **621.6 → 414.4 MB (-207.2 MB)**
+    - Keyboard Lighting: **8.48% → 0.23% CPU (-97.3%)**, **625.0 → 415.5 MB (-209.5 MB)**
+    - Studio Live Streaming: **14.13% → 0.84% CPU (-94.1%)**, **668.0 → 432.8 MB (-235.2 MB)**
+    - About (Static): **0.03% → 0.00% CPU**, **415.5 → 395.8 MB**
+- **Streamlined `README.md` and UI copy**: Removed redundant implementation hype and refreshed showcase screenshots (`docs/screenshots/*.png`).
+
 ## [0.5.0] - 2026-11-20
 
 ### Added

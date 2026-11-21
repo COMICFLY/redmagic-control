@@ -1,5 +1,7 @@
-/* 轻量实时灯光预览引擎（~24fps 节流，支持键盘 100 键背光 + 24 段顶部 Logo 灯条 + 鼠标三灯区）。
+/* 轻量实时灯光预览引擎（单层 Canvas 零 DOM 重排，支持键盘 100 键背光 + 26 段顶部 Logo 灯条 + 鼠标三灯区）。
  * 自动响应 prefers-reduced-motion 与关闭/静态模式（静态时零轮询开销）。 */
+
+import { drawKeyboardLedCanvas } from "./stage.js";
 
 function hexToHsl(hex) {
   const clean = String(hex || "#e53945").replace("#", "");
@@ -130,12 +132,14 @@ function evalMouseZone(mode, idx, t, baseHsl, multi, maxOp) {
 export class LightingAnimator {
   constructor() {
     this._raf = null;
-    this._lastFrame = 0;
+    this._timer = null;
     this._reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
   }
 
   stop() {
+    if (this._timer) clearTimeout(this._timer);
     if (this._raf) cancelAnimationFrame(this._raf);
+    this._timer = null;
     this._raf = null;
   }
 
@@ -143,19 +147,22 @@ export class LightingAnimator {
     this.stop();
     if (!rootEl || !device || !hwState?.config) return;
 
-    const kbLeds = [...rootEl.querySelectorAll(".kb-led")];
-    const logoSegs = [...rootEl.querySelectorAll(".logo-seg")];
-    const msZones = [...rootEl.querySelectorAll(".ms-led-zone")];
-    if (!kbLeds.length && !logoSegs.length && !msZones.length) return;
+    const kbCanvas = device.kind === "keyboard" ? rootEl.querySelector(".kb-led-canvas") : null;
+    const kbCtx = kbCanvas ? kbCanvas.getContext("2d") : null;
+    const showKeys = kbCanvas?.dataset.showKeys === "1";
+    const msZones = device.kind === "mouse"
+      ? [...rootEl.querySelectorAll(".ms-led-zone")].map((el) => ({ el, c: "", o: "" }))
+      : [];
+    if (!kbCtx && !msZones.length) return;
 
     const cfg = hwState.config;
     const kbHsl = device.kind === "keyboard" ? hexToHsl(cfg.light.color) : null;
     const logoHsl = device.kind === "keyboard" ? hexToHsl(cfg.logo.color) : null;
     const msHsl = device.kind === "mouse" ? hexToHsl(cfg.light.color) : null;
 
-    // 键帽灯不透明度克制在 0.52 以内（配合边缘导光渐变，绝不遮挡键帽字符）
-    const kbOp = device.kind === "keyboard" ? (cfg.light.brightness / 4) * 0.52 : 0;
-    const logoOp = device.kind === "keyboard" ? (cfg.logo.brightness / 4) * 0.88 : 0;
+    // 键帽灯不透明度克制在 0.62 以内，清晰透出键帽字符
+    const kbOp = device.kind === "keyboard" ? (cfg.light.brightness / 4) * 0.62 : 0;
+    const logoOp = device.kind === "keyboard" ? (cfg.logo.brightness / 4) * 0.9 : 0;
     const msOp = device.kind === "mouse" ? (cfg.light.brightness / 4) * 0.86 : 0;
 
     const kbSpeedMul = device.kind === "keyboard" ? 0.55 + cfg.light.speed * 0.45 : 1;
@@ -163,23 +170,23 @@ export class LightingAnimator {
     const msSpeedMul = device.kind === "mouse" ? 0.5 + cfg.light.speed * 0.3 : 1;
 
     const paint = (tSec) => {
-      if (device.kind === "keyboard") {
-        for (const el of kbLeds) {
-          const r = evalKbKey(cfg.light.mode, Number(el.dataset.nx), Number(el.dataset.ny), tSec * kbSpeedMul, kbHsl, cfg.light.multiColor, kbOp, cfg.light.direction);
-          el.style.color = r.color;
-          el.style.opacity = r.op.toFixed(2);
-        }
-        const n = logoSegs.length || 1;
-        for (let i = 0; i < logoSegs.length; i++) {
-          const r = evalLogoSeg(cfg.logo.mode, i / n, tSec * logoSpeedMul, logoHsl, cfg.logo.sevenColor, logoOp);
-          logoSegs[i].style.color = r.color;
-          logoSegs[i].style.opacity = r.op.toFixed(2);
-        }
+      if (kbCtx) {
+        const kbT = tSec * kbSpeedMul;
+        const logoT = tSec * logoSpeedMul;
+        drawKeyboardLedCanvas(
+          kbCtx,
+          showKeys,
+          (k) => evalKbKey(cfg.light.mode, k.nx, k.ny, kbT, kbHsl, cfg.light.multiColor, kbOp, cfg.light.direction),
+          (i, total) => evalLogoSeg(cfg.logo.mode, i / total, logoT, logoHsl, cfg.logo.sevenColor, logoOp),
+        );
       } else {
+        const msT = tSec * msSpeedMul;
         for (let i = 0; i < msZones.length; i++) {
-          const r = evalMouseZone(cfg.light.mode, i, tSec * msSpeedMul, msHsl, cfg.light.multiColor, msOp);
-          msZones[i].style.setProperty("--zone-color", r.color);
-          msZones[i].style.opacity = r.op.toFixed(2);
+          const item = msZones[i];
+          const r = evalMouseZone(cfg.light.mode, i, msT, msHsl, cfg.light.multiColor, msOp);
+          const opStr = r.op.toFixed(2);
+          if (item.c !== r.color) { item.c = r.color; item.el.style.setProperty("--zone-color", r.color); }
+          if (item.o !== opStr) { item.o = opStr; item.el.style.opacity = opStr; }
         }
       }
     };
@@ -187,19 +194,28 @@ export class LightingAnimator {
     // 首帧立即渲染
     paint(0.6);
 
+    const kbKeysStatic = !showKeys || cfg.light.mode === 5 || cfg.light.mode === 18 || cfg.light.mode === 19 || kbOp <= 0.01;
+    const kbLogoStatic = cfg.logo.mode === 3 || cfg.logo.mode === 8 || logoOp <= 0.01;
     const isStatic = this._reduced
-      || (device.kind === "keyboard" && (cfg.light.mode === 5 || cfg.light.mode === 19) && (cfg.logo.mode === 3 || cfg.logo.mode === 8))
-      || (device.kind === "mouse" && (cfg.light.mode === 3 || cfg.light.mode === 4));
+      || (device.kind === "keyboard" && kbKeysStatic && kbLogoStatic)
+      || (device.kind === "mouse" && (cfg.light.mode === 3 || cfg.light.mode === 4 || msOp <= 0.01));
     if (isStatic) return;
 
     const startMs = performance.now();
-    const tick = (now) => {
-      if (now - this._lastFrame >= 42) { // ~24fps 轻量刷新
-        this._lastFrame = now;
-        paint((now - startMs) / 1000 + 0.6);
-      }
-      this._raf = requestAnimationFrame(tick);
+    const scheduleNext = () => {
+      if (document.hidden || document.body.classList.contains("is-tray-hidden")) return;
+      const gap = document.hasFocus() ? 55 : 220; // 聚焦 ~18fps，失焦 ~4.5fps；帧间零 rAF 空转
+      this._timer = setTimeout(() => {
+        this._timer = null;
+        if (document.hidden || document.body.classList.contains("is-tray-hidden")) return;
+        this._raf = requestAnimationFrame((now) => {
+          this._raf = null;
+          if (document.hidden || document.body.classList.contains("is-tray-hidden")) return;
+          paint((now - startMs) / 1000 + 0.6);
+          scheduleNext();
+        });
+      }, gap);
     };
-    this._raf = requestAnimationFrame(tick);
+    scheduleNext();
   }
 }

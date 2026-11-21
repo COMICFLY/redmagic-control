@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::devices::catalog::get_metadata_json;
 use crate::devices::manager::{DeviceDescriptor, DeviceManager};
+use crate::settings::{AppSettingsPatch, SettingsStore};
 use crate::studio::runner::NativeStreamConfig;
 use crate::studio::server::{DEFAULT_HTTP_PORT, DEFAULT_UDP_PORT};
 use crate::studio::StudioEngine;
@@ -20,6 +21,7 @@ use crate::updater::{
 pub struct AppState {
     pub manager: DeviceManager,
     pub studio: StudioEngine,
+    pub settings: SettingsStore,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -55,6 +57,20 @@ pub async fn app_check_update() -> Result<Value, String> {
 pub fn app_open_url(url: String) -> Result<Value, String> {
     open_external_url(&url)?;
     Ok(json!({ "ok": true }))
+}
+
+#[tauri::command]
+pub fn app_settings_get(state: State<'_, AppState>) -> Value {
+    serde_json::to_value(state.settings.view()).unwrap_or_else(|_| json!({}))
+}
+
+#[tauri::command]
+pub fn app_settings_set(
+    state: State<'_, AppState>,
+    patch: AppSettingsPatch,
+) -> Result<Value, String> {
+    let view = state.settings.apply_patch(patch)?;
+    Ok(serde_json::to_value(view).unwrap_or_else(|_| json!({})))
 }
 
 #[tauri::command]
@@ -501,14 +517,16 @@ pub fn app_hide_to_tray(
     state: State<'_, AppState>,
     window: tauri::WebviewWindow,
 ) -> Result<Value, String> {
-    // 若由纯 Rust 引擎或外部 API 桥驱动，直接销毁 WebView2 释放全部 ~300MB 内存与 6 个浏览器进程！
-    if state.studio.is_rust_owned_streaming() {
+    // 仅手写自定义 JS 脚本正在推流时需保留隐藏 WebView2（且关闭 GPU 合成）；
+    // 其余情况（空闲挂起 / 纯 Rust 原生推流 / 外部 API）一律直接销毁 WebView2 释放全部 ~300MB 内存与 6 个浏览器进程！
+    let custom_js_streaming =
+        state.manager.has_any_direct_rgb() && !state.studio.is_rust_owned_streaming();
+    if !custom_js_streaming {
         window
             .destroy()
             .map_err(|e| format!("释放前端窗口失败: {e}"))?;
         return Ok(json!({ "ok": true, "mode": "headless-rust" }));
     }
-    // 手写自定义 JS 脚本模式：隐藏窗口并关闭 WebView2 可见性合成，使 GPU 占用降至 0%
     let _ = window.emit("studio:tray-hidden", json!({ "ok": true }));
     #[cfg(windows)]
     let _ = window.with_webview(|wv| unsafe {

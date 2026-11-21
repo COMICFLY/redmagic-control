@@ -39,10 +39,11 @@
   --glass-accent: linear-gradient(155deg, rgba(229, 57, 69, 0.22) 0%, rgba(229, 57, 69, 0.09) 100%);
   --glass-toast: linear-gradient(155deg, rgba(30, 35, 48, 0.78) 0%, rgba(16, 19, 28, 0.72) 100%);
 
-  --blur-xl: blur(28px) saturate(175%);
-  --blur-lg: blur(22px) saturate(165%);
-  --blur-md: blur(14px) saturate(155%);
-  --blur-sm: blur(10px) saturate(145%);
+  /* 由 Windows 11 原生 DWM Acrylic 提供整窗毛玻璃背景；禁用内部 40+ 控件逐层 backdrop-filter 高斯模糊以消除前台 GPU 合成开销 */
+  --blur-xl: none;
+  --blur-lg: none;
+  --blur-md: none;
+  --blur-sm: none;
 
   --border-hairline: rgba(255, 255, 255, 0.085);
   --border-strong: rgba(255, 255, 255, 0.16);
