@@ -26,8 +26,8 @@
 
 | 设备型号 | 产品名称 | 主控方案 | VID | 有线 PID | 2.4G 接收器 PID | 蓝牙识别特征 | 厂商 HID 通道 | 硬件键槽数 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **GK001S** | REDMAGIC Keyboard 1S | `VS11K16A` (+ nRF52 BLE) | `0x320F` / `0x0C45` | `0x5134` | `0x5135` | `GK001S 5.1` / PnP `0x05AC:0x024F` | Usage Page `0xFF1C`, Usage `0x92` | `126` 槽位 (`378 B`) |
-| **GS001S** | REDMAGIC Mouse 1S | `VS11K17A` | `0x320F` / `0x0C45` | `0x2276` | `0x2277` | `GS001S` / `0x320F:0x2276/2277` | Usage Page `0xFF1C`, Usage `0x92` | `12` 槽位 (`36 B`) |
+| **GK001S** | REDMAGIC Keyboard 1S | `VS11K16A` (+ nRF52 BLE) | `0x320F` | `0x5134` | `0x5135` | `GK001S 5.1` / PnP `0x05AC:0x024F` | Usage Page `0xFF1C`, Usage `0x92` | `126` 槽位 (`378 B`) |
+| **GS001S** | REDMAGIC Mouse 1S | `VS11K17A` | `0x320F` | `0x2276` | `0x2277` | `GS001S` / `0x320F:0x2276/2277` | Usage Page `0xFF1C`, Usage `0x92` | `12` 槽位 (`36 B`) |
 
 ### 1.2 三模连接支持矩阵
 

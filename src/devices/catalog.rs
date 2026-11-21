@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 
 use crate::protocol::{CHUNK_SIZE, CHUNK_SIZE_24G};
 
-pub const VIDS: &[u16] = &[0x320f, 0x0c45];
+// 对齐官方 Goper.exe 静态设备注册表：GK001S / GS001S 均仅使用 VID 0x320F（严禁引入 0x0C45 通用 Sonix VID）
+pub const VIDS: &[u16] = &[0x320f];
 pub const VENDOR_PAGE: u16 = 0xff1c;
 pub const VENDOR_USAGE: u16 = 0x92;
 
@@ -103,7 +104,7 @@ pub const DEVICES: &[DeviceCatalogEntry] = &[
         firmware: "V0112",
         image: "assets/redmagic-keyboard.png",
         card: "assets/device-kb-card.png",
-        vids: &[0x320f, 0x0c45],
+        vids: &[0x320f],
         pids: &[0x5134, 0x5135],
         wired_pid: 0x5134,
         wireless24g_pid: 0x5135,
@@ -124,12 +125,12 @@ pub const DEVICES: &[DeviceCatalogEntry] = &[
         firmware: "V0112",
         image: "assets/redmagic-mouse.png",
         card: "assets/device-ms-card.png",
-        vids: &[0x320f, 0x0c45],
+        vids: &[0x320f],
         pids: &[0x2276, 0x2277],
         wired_pid: 0x2276,
         wireless24g_pid: 0x2277,
         key_count: 12,
-        bt_names: &["gs001s", "redmagic gs001", "redmagic mouse"],
+        bt_names: &["gs001s", "redmagic gs001", "redmacic gs001", "redmagic mouse"],
         bt_pnp_ids: &[
             BtPnpId { vid: 0x320f, pid: 0x2276, require_name: false },
             BtPnpId { vid: 0x320f, pid: 0x2277, require_name: false },
@@ -142,18 +143,20 @@ pub fn is_bluetooth_hid_path(path: &str) -> bool {
     p.contains("bthle") || p.contains("bthenum") || p.contains("{00001812-0000-1000-8000-00805f9b34fb}")
 }
 
-pub fn match_catalog_by_hid(pid: u16, product: &str) -> Option<&'static DeviceCatalogEntry> {
-    if let Some(d) = DEVICES.iter().find(|d| d.pids.contains(&pid)) {
-        return Some(d);
+/// 严格按 `(VID, PID)` 匹配 USB 有线 / 2.4G HID 设备（对齐官方 Goper.exe 静态设备表）。
+/// 绝不以 `"mouse"` / `"keyboard"` 等通用产品名做模糊兜底，避免将其他使用 0x320F / 0x0C45 公版方案的鼠标或键盘误识别为红魔外设。
+pub fn match_catalog_by_hid(
+    vid: u16,
+    pid: u16,
+    product: &str,
+    is_bluetooth: bool,
+) -> Option<&'static DeviceCatalogEntry> {
+    if is_bluetooth {
+        return match_bt_catalog(product, vid, pid);
     }
-    let low = product.to_ascii_lowercase();
-    if low.contains("gk001") || low.contains("keyboard") {
-        return Some(&DEVICES[0]);
-    }
-    if low.contains("gs001") || low.contains("mouse") {
-        return Some(&DEVICES[1]);
-    }
-    None
+    DEVICES
+        .iter()
+        .find(|d| d.vids.contains(&vid) && d.pids.contains(&pid))
 }
 
 pub fn match_bt_catalog(name: &str, vid: u16, pid: u16) -> Option<&'static DeviceCatalogEntry> {
@@ -255,4 +258,60 @@ pub fn get_metadata_json(version: &str) -> Value {
             { "slot": 5, "code": "DPI", "name": "DPI 切换键", "x": 50, "y": 38 }
         ]
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_only_exact_redmagic_vid_pid_and_rejects_third_party_mice() {
+        // 正品红魔 1S 键鼠（有线 / 2.4G）
+        assert_eq!(
+            match_catalog_by_hid(0x320f, 0x5134, "REDMACIC GK001S", false).map(|d| d.id),
+            Some("kb-1s")
+        );
+        assert_eq!(
+            match_catalog_by_hid(0x320f, 0x5135, "REDMAGIC GK001S", false).map(|d| d.id),
+            Some("kb-1s")
+        );
+        assert_eq!(
+            match_catalog_by_hid(0x320f, 0x2276, "GS001S", false).map(|d| d.id),
+            Some("ms-1s")
+        );
+        assert_eq!(
+            match_catalog_by_hid(0x320f, 0x2277, "", false).map(|d| d.id),
+            Some("ms-1s")
+        );
+
+        // 严禁把同为 0x320F (EVision) 或 0x0C45 (Sonix) 的第三方鼠标 / 键盘误识别为红魔外设
+        assert!(match_catalog_by_hid(0x320f, 0x5088, "2.4G Wireless Gaming Mouse", false).is_none());
+        assert!(match_catalog_by_hid(0x320f, 0x2210, "VXE R1 Pro Mouse", false).is_none());
+        assert!(match_catalog_by_hid(0x320f, 0x1004, "MousePad", false).is_none());
+        assert!(match_catalog_by_hid(0x320f, 0x5055, "USB Mechanical Keyboard", false).is_none());
+        assert!(match_catalog_by_hid(0x0c45, 0x2276, "USB Gaming Mouse", false).is_none());
+        assert!(match_catalog_by_hid(0x0c45, 0x2277, "2.4G Wireless Mouse", false).is_none());
+        assert!(match_catalog_by_hid(0x0c45, 0x5134, "USB Gaming Keyboard", false).is_none());
+        assert!(match_catalog_by_hid(0x0c45, 0x8520, "Gaming Mouse", false).is_none());
+
+        // 蓝牙 HID 通道同样严禁匹配非红魔鼠标 / 键盘
+        assert!(match_catalog_by_hid(0x046d, 0xb034, "Logitech Wireless Mouse", true).is_none());
+        assert!(match_catalog_by_hid(0x320f, 0x5088, "ATK X1 Wireless Mouse", true).is_none());
+        assert!(match_catalog_by_hid(0x1532, 0x2276, "Razer Gaming Mouse", true).is_none());
+        assert!(match_catalog_by_hid(0x05ac, 0x024f, "Apple Magic Keyboard", true).is_none());
+
+        // 正品红魔蓝牙设备正常识别
+        assert_eq!(
+            match_catalog_by_hid(0x05ac, 0x024f, "GK001S 5.1", true).map(|d| d.id),
+            Some("kb-1s")
+        );
+        assert_eq!(
+            match_catalog_by_hid(0x320f, 0x2277, "GS001S", true).map(|d| d.id),
+            Some("ms-1s")
+        );
+        assert_eq!(
+            match_catalog_by_hid(0x0000, 0x0000, "REDMAGIC Mouse 1S", true).map(|d| d.id),
+            Some("ms-1s")
+        );
+    }
 }

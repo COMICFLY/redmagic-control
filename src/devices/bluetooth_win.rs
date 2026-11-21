@@ -80,7 +80,7 @@ pub fn parse_vid_pid_from_id(text: &str) -> (u16, u16) {
         }
         0
     };
-    let vid = parse_after(&["VID&02", "VID_", "VID&"]);
+    let vid = parse_after(&["VID&02", "VID&01", "VID_", "VID&"]);
     let pid = parse_after(&["PID_", "PID&"]);
     (vid, pid)
 }

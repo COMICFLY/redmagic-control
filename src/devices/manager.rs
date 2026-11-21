@@ -198,8 +198,11 @@ fn compute_raw_path_sig(all_hid: &[HidDeviceInfo]) -> String {
     let mut parts: Vec<String> = all_hid
         .iter()
         .filter(|d| {
-            (VIDS.contains(&d.vendor_id) && d.usage_page == VENDOR_PAGE && d.usage == VENDOR_USAGE)
-                || is_bluetooth_hid_path(&d.path)
+            let is_bt = is_bluetooth_hid_path(&d.path);
+            (d.usage_page == VENDOR_PAGE
+                && d.usage == VENDOR_USAGE
+                && match_catalog_by_hid(d.vendor_id, d.product_id, &d.product, is_bt).is_some())
+                || is_bt
         })
         .map(|d| format!("{}:{}:{}:{}:{}", d.vendor_id, d.product_id, d.usage_page, d.usage, d.path))
         .collect();
@@ -389,7 +392,8 @@ impl DeviceManager {
             HashMap::new();
 
         for iface in vendor_ifaces {
-            let Some(meta) = match_catalog_by_hid(iface.product_id, &iface.product) else {
+            let is_bt = is_bluetooth_hid_path(&iface.path);
+            let Some(meta) = match_catalog_by_hid(iface.vendor_id, iface.product_id, &iface.product, is_bt) else {
                 continue;
             };
             let mode = infer_connection_mode(meta, iface.product_id, &iface.product, &iface.path);

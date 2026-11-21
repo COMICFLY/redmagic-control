@@ -5,6 +5,13 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-11-21
+
+### Fixed
+- **Fixed third-party mice/keyboards being misidentified as REDMAGIC peripherals (`catalog.rs`, `manager.rs`)**:
+  - Removed the generic `"mouse"` / `"keyboard"` USB product-string fallback in `match_catalog_by_hid` that caused non-REDMAGIC mice/keyboards using shared OEM VIDs (`0x320F` EVision / `0x0C45` Sonix, e.g. ATK, VGN, VXE, Redragon, Dareu, Delux, Ajazz, Glorious) with `UsagePage 0xFF1C / Usage 0x92` to be falsely recognized as `REDMAGIC Mouse 1S (GS001S)` or `REDMAGIC Keyboard 1S (GK001S)`.
+  - Aligned USB/2.4G HID matching strictly with official `Goper.exe` exact `(VID, PID)` pairs (`0x320F:0x5134/0x5135` for `GK001S`, `0x320F:0x2276/0x2277` for `GS001S`), removed unofficial generic Sonix VID `0x0C45`, and routed Bluetooth HID interfaces strictly through `match_bt_catalog`.
+
 ## [0.7.2] - 2026-11-21
 
 ### Fixed
