@@ -460,10 +460,11 @@ fn main() {
                 let click_fq = setup_force_quit.clone();
                 let menu_mgr = setup_mgr.clone();
                 let menu_studio = setup_studio.clone();
+                let menu_settings = setup_settings.clone();
                 let menu_fq = setup_force_quit.clone();
 
                 let mut tray_builder = TrayIconBuilder::with_id("main-tray")
-                    .tooltip("REDMAGIC Control — 轻量纯 Rust 后台灯效引擎")
+                    .tooltip("REDMAGIC Control")
                     .menu(&tray_menu)
                     .show_menu_on_left_click(false)
                     .on_tray_icon_event(move |tray, event| {
@@ -506,6 +507,7 @@ fn main() {
                             menu_studio.server.stop(&menu_mgr);
                             menu_studio.set_sensors(false, false, false);
                             menu_mgr.stop_all_direct_rgb();
+                            menu_settings.set_studio_running(Some(false), Some(false));
                             let _ = app_handle.emit(
                                 "studio:stopped",
                                 serde_json::json!({ "source": "tray" }),
@@ -530,6 +532,55 @@ fn main() {
             monitor_mgr.start_monitor(move |evt| {
                 let _ = handle.emit("device:event", evt);
             });
+
+            // 若开启「启动时自动恢复上次推流」且上次退出前正在运行原生推流或外部控灯服务，
+            // 在后台静默等待键盘就绪并直接恢复（开机 --autostart 静默进托盘时也能零窗口自动点亮）。
+            if !force_mock && !headless_shot && setup_settings.auto_resume_studio() {
+                let persisted = setup_settings.studio_snapshot();
+                let want_server = persisted.was_server_running;
+                let native_cfg = if !want_server && persisted.was_streaming {
+                    persisted.to_native_config()
+                } else {
+                    None
+                };
+                if want_server || native_cfg.is_some() {
+                    let resume_mgr = setup_mgr.clone();
+                    let resume_studio = setup_studio.clone();
+                    std::thread::spawn(move || {
+                        for _ in 0..6 {
+                            std::thread::sleep(std::time::Duration::from_millis(600));
+                            if resume_studio.is_rust_owned_streaming() {
+                                return;
+                            }
+                            let devs = resume_mgr.list_devices(true);
+                            if let Some(kb) = devs
+                                .into_iter()
+                                .find(|d| d.kind == "keyboard" && d.supports_config)
+                            {
+                                if want_server {
+                                    let _ = resume_studio.server.start(
+                                        resume_mgr,
+                                        kb.id,
+                                        persisted.udp_port,
+                                        persisted.http_port,
+                                        persisted.include_logo,
+                                    );
+                                } else if let Some(cfg) = native_cfg {
+                                    let _ = resume_studio.runner.start(
+                                        resume_mgr,
+                                        kb.id,
+                                        resume_studio.audio.clone(),
+                                        resume_studio.ambilight.clone(),
+                                        resume_studio.keys.clone(),
+                                        cfg,
+                                    );
+                                }
+                                return;
+                            }
+                        }
+                    });
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -538,6 +589,7 @@ fn main() {
             commands::app_open_url,
             commands::app_settings_get,
             commands::app_settings_set,
+            commands::app_open_data_dir,
             commands::app_hide_to_tray,
             commands::device_list,
             commands::device_rescan,

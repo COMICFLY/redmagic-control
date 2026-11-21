@@ -97,7 +97,11 @@ const state = {
       closeToTray: true,
       startMinimized: true,
       autoCheckUpdate: true,
+      autoResumeStudio: true,
+      skippedUpdateVersion: "",
       autostart: false,
+      settingsPath: "",
+      studio: null,
     },
   },
   busy: false,
@@ -284,6 +288,82 @@ function scheduleNativeConfigSync() {
   }, 25);
 }
 
+function buildPersistedStudioSnapshot(st) {
+  return {
+    subMode: st.subMode || "script",
+    scriptId: st.scriptId || "aurora",
+    scriptCode: typeof st.scriptCode === "string" ? st.scriptCode : null,
+    p1: Number(st.p1 ?? 0.55),
+    p2: Number(st.p2 ?? 0.5),
+    p3: Number(st.p3 ?? 0.15),
+    layers: {
+      gradient: { ...st.layers.gradient },
+      audio: { ...st.layers.audio },
+      ambilight: { ...st.layers.ambilight },
+      typing: { ...st.layers.typing },
+    },
+    streamSource: st.streamSource || "script",
+    includeLogo: Boolean(st.includeLogo),
+    brightness: Number(st.brightness ?? 1.0),
+    paintGroup: Number(st.paintGroup ?? 0) & 3,
+    paintColor: st.paintColor || "#e53945",
+    udpPort: Number(st.udpPort || 27650),
+    httpPort: Number(st.httpPort || 27651),
+    nativeEligible: isNativeEligible(st),
+    wasStreaming: Boolean(st.streaming && st.nativeStreaming),
+    wasServerRunning: Boolean(st.serverStatus?.running),
+  };
+}
+
+function applyPersistedStudio(saved) {
+  if (!saved || typeof saved !== "object") return;
+  const st = state.ui.studio;
+  if (["paint", "script", "layers", "api"].includes(saved.subMode)) st.subMode = saved.subMode;
+  const found = STUDIO_SCRIPTS.find((s) => s.id === saved.scriptId);
+  if (found) {
+    st.scriptId = found.id;
+    st.scriptCode = typeof saved.scriptCode === "string" && saved.scriptCode.trim() ? saved.scriptCode : found.code;
+    st.scriptSensors = { ...found.sensors };
+  } else if (typeof saved.scriptCode === "string" && saved.scriptCode.trim()) {
+    st.scriptId = saved.scriptId || "custom";
+    st.scriptCode = saved.scriptCode;
+  }
+  if (typeof saved.p1 === "number") st.p1 = saved.p1;
+  if (typeof saved.p2 === "number") st.p2 = saved.p2;
+  if (typeof saved.p3 === "number") st.p3 = saved.p3;
+  if (saved.layers && typeof saved.layers === "object") {
+    for (const k of ["gradient", "audio", "ambilight", "typing"]) {
+      if (saved.layers[k]) st.layers[k] = { ...st.layers[k], ...saved.layers[k] };
+    }
+  }
+  if (saved.streamSource === "layers" || saved.streamSource === "script") st.streamSource = saved.streamSource;
+  if (typeof saved.includeLogo === "boolean") st.includeLogo = saved.includeLogo;
+  if (typeof saved.brightness === "number") st.brightness = saved.brightness;
+  if (typeof saved.paintGroup === "number") st.paintGroup = Math.max(0, Math.min(3, Math.round(saved.paintGroup)));
+  if (typeof saved.paintColor === "string" && /^#[0-9a-f]{6}$/i.test(saved.paintColor)) st.paintColor = saved.paintColor;
+  if (typeof saved.udpPort === "number" && saved.udpPort >= 1024 && saved.udpPort <= 65535) st.udpPort = saved.udpPort;
+  if (typeof saved.httpPort === "number" && saved.httpPort >= 1024 && saved.httpPort <= 65535) st.httpPort = saved.httpPort;
+}
+
+let studioPersistTimer = null;
+function scheduleStudioPersist(immediate = false) {
+  if (!window.rm?.setSettings) return Promise.resolve();
+  if (studioPersistTimer) {
+    clearTimeout(studioPersistTimer);
+    studioPersistTimer = null;
+  }
+  const flush = () =>
+    window.rm.setSettings({ studio: buildPersistedStudioSnapshot(state.ui.studio) }).catch(() => {});
+  if (immediate) {
+    return flush();
+  }
+  studioPersistTimer = setTimeout(() => {
+    studioPersistTimer = null;
+    flush();
+  }, 300);
+  return Promise.resolve();
+}
+
 async function handoffCustomJsIfNeeded() {
   const st = state.ui.studio;
   if (!st.streaming || !st.nativeStreaming || isNativeEligible(st)) return;
@@ -301,6 +381,7 @@ async function handoffCustomJsIfNeeded() {
 
 async function hideWindowToTray() {
   if (!window.rm?.hideToTray) return;
+  await scheduleStudioPersist(true);
   try {
     await callApi("hideToTray");
   } catch (err) {
@@ -498,7 +579,7 @@ async function checkForUpdates({ silent = false, forceModal = false } = {}) {
     const info = await callApi("checkUpdate");
     upd.info = info;
     if (info?.hasUpdate) {
-      const skipped = localStorage.getItem("rm_skipped_version");
+      const skipped = state.ui.settings?.skippedUpdateVersion || localStorage.getItem("rm_skipped_version") || "";
       if (forceModal || !silent || skipped !== info.latestVersion) {
         upd.modalOpen = true;
         renderUpdateModalOverlay();
@@ -936,7 +1017,10 @@ function bindEvents() {
   // 窗口控制
   $("#win-min").addEventListener("click", () => window.rm?.win.minimize());
   $("#win-max").addEventListener("click", () => window.rm?.win.toggleMax());
-  $("#win-close").addEventListener("click", () => window.rm?.win.close());
+  $("#win-close").addEventListener("click", async () => {
+    if (studioPersistTimer) await scheduleStudioPersist(true);
+    window.rm?.win.close();
+  });
 
   // 顶部导航（允许后台持续推流，切页绝不中断实时 RAM 推流）
   $("#nav-tabs").addEventListener("click", async (e) => {
@@ -1019,7 +1103,11 @@ function bindEvents() {
     }
     if (btn.id === "update-modal-skip") {
       const ver = state.ui.update.info?.latestVersion;
-      if (ver) localStorage.setItem("rm_skipped_version", ver);
+      if (ver) {
+        localStorage.setItem("rm_skipped_version", ver);
+        if (state.ui.settings) state.ui.settings.skippedUpdateVersion = ver;
+        window.rm?.setSettings?.({ skippedUpdateVersion: ver }).catch(() => {});
+      }
       state.ui.update.modalOpen = false;
       renderUpdateModalOverlay();
       toast("已跳过此版本提醒", ver ? `v${ver} 将不再自动弹窗，仍可在「关于」手动更新` : "");
@@ -1454,6 +1542,7 @@ function bindEvents() {
         }
       }
       await syncStudioSensors();
+      scheduleStudioPersist();
       renderDeviceRail();
       renderWorkspace();
       return;
@@ -1461,6 +1550,7 @@ function bindEvents() {
     if (el.dataset.paintGroup !== undefined) {
       const g = Number(el.dataset.paintGroup);
       st.paintGroup = g;
+      scheduleStudioPersist();
       await loadPaintGroupFromHw(g, { forceOverwrite: true, silent: false });
       renderWorkspace();
       return;
@@ -1473,6 +1563,7 @@ function bindEvents() {
     if (el.dataset.paintSwatch) {
       st.paintColor = el.dataset.paintSwatch;
       if (st.paintTool === "eraser") st.paintTool = "brush";
+      scheduleStudioPersist();
       renderWorkspace();
       return;
     }
@@ -1537,6 +1628,7 @@ function bindEvents() {
           }
         }
       }
+      scheduleStudioPersist();
       renderDeviceRail();
       renderWorkspace();
       return;
@@ -1591,6 +1683,7 @@ function bindEvents() {
           }
         }
         await syncStudioSensors();
+        scheduleStudioPersist(true);
         renderWorkspace();
         toast("灯效方案已导入", res.name || "");
       } catch (err) {
@@ -1677,6 +1770,27 @@ function bindEvents() {
       await openExternalUrl(el.dataset.openUrl);
       return;
     }
+    if (el.id === "light-goto-paint-btn") {
+      const dev = currentDevice();
+      const hw = dev ? state.hwStates.get(dev.id) : null;
+      const grp = Number(hw?.config?.light?.customGroup ?? 0);
+      state.ui.studio.subMode = "paint";
+      state.ui.studio.paintGroup = Math.max(0, Math.min(3, grp));
+      state.ui.studio.paintLoaded = false;
+      state.tab = "studio";
+      scheduleStudioPersist();
+      renderNavTabs();
+      renderWorkspace();
+      return;
+    }
+    if (el.id === "about-open-data-dir-btn") {
+      try {
+        await callApi("openDataDir");
+      } catch (err) {
+        toast("打开配置目录失败", err.message, true);
+      }
+      return;
+    }
     if (el.id === "about-copy-repo-btn") {
       const url = state.meta?.repoUrl || "https://github.com/COMICFLY/redmagic-control";
       navigator.clipboard?.writeText(url);
@@ -1702,6 +1816,7 @@ function bindEvents() {
     const st = state.ui.studio;
     if (el.id === "studio-code-editor") {
       st.scriptCode = el.value;
+      scheduleStudioPersist();
       if (st.streaming && st.nativeStreaming && !isNativeEligible(st)) {
         handoffCustomJsIfNeeded();
       }
@@ -1713,6 +1828,7 @@ function bindEvents() {
       const valEl = $(`#studio-${p}-val`);
       if (valEl) valEl.textContent = `${el.value}%`;
       scheduleNativeConfigSync();
+      scheduleStudioPersist();
       return;
     }
     if (el.id === "studio-bri-range") {
@@ -1720,34 +1836,38 @@ function bindEvents() {
       const valEl = $("#studio-bri-val");
       if (valEl) valEl.textContent = `${el.value}%`;
       scheduleNativeConfigSync();
+      scheduleStudioPersist();
       return;
     }
     if (el.id === "studio-paint-picker") {
       st.paintColor = el.value;
       if (st.paintTool === "eraser") st.paintTool = "brush";
       studioCtrl.repaintNow();
+      scheduleStudioPersist();
       return;
     }
     if (el.dataset.layerRange) {
       const [lk, fk] = el.dataset.layerRange.split(".");
       if (st.layers[lk]) st.layers[lk][fk] = Number(el.value) / 100;
       scheduleNativeConfigSync();
+      scheduleStudioPersist();
       return;
     }
     if (el.dataset.layerField) {
       const [lk, fk] = el.dataset.layerField.split(".");
       if (st.layers[lk]) st.layers[lk][fk] = el.value;
       scheduleNativeConfigSync();
+      scheduleStudioPersist();
       return;
     }
     if (el.id === "studio-udp-port") {
       const v = Number(el.value);
-      if (v >= 1024 && v <= 65535) st.udpPort = v;
+      if (v >= 1024 && v <= 65535) { st.udpPort = v; scheduleStudioPersist(); }
       return;
     }
     if (el.id === "studio-http-port") {
       const v = Number(el.value);
-      if (v >= 1024 && v <= 65535) st.httpPort = v;
+      if (v >= 1024 && v <= 65535) { st.httpPort = v; scheduleStudioPersist(); }
       return;
     }
     if (el.id === "screen-zoom-range") {
@@ -1972,6 +2092,16 @@ function bindEvents() {
       }
       return;
     }
+    if (el.id === "about-auto-resume-toggle") {
+      try {
+        state.ui.settings = await callApi("setSettings", { autoResumeStudio: el.checked });
+        toast(el.checked ? "已开启启动自动恢复推流" : "已关闭启动自动恢复推流", el.checked ? "重启或开机静默进托盘后将自动恢复上次灯效推流" : "重启后默认保持键盘板载灯效");
+      } catch (err) {
+        toast("保存设置失败", err.message, true);
+        renderWorkspace();
+      }
+      return;
+    }
     if (el.id === "about-auto-update-toggle") {
       state.ui.update.autoCheck = el.checked;
       localStorage.setItem("rm_auto_update", el.checked ? "1" : "0");
@@ -1984,6 +2114,7 @@ function bindEvents() {
     const st = state.ui.studio;
     if (el.id === "studio-logo-sync") {
       st.includeLogo = el.checked;
+      scheduleStudioPersist();
       if (st.streaming) {
         if (st.nativeStreaming) {
           scheduleNativeConfigSync();
@@ -2009,12 +2140,14 @@ function bindEvents() {
       const lk = el.dataset.layerToggle;
       if (st.layers[lk]) st.layers[lk].enabled = el.checked;
       scheduleNativeConfigSync();
+      scheduleStudioPersist();
       await syncStudioSensors();
       renderWorkspace();
       return;
     }
     if (el.id === "studio-paint-picker") {
       st.paintColor = el.value;
+      scheduleStudioPersist();
       renderWorkspace();
       return;
     }
@@ -2022,6 +2155,7 @@ function bindEvents() {
       const clamped = Math.max(1024, Math.min(65535, Number(el.value) || (el.id === "studio-udp-port" ? 27650 : 27651)));
       if (el.id === "studio-udp-port") st.udpPort = clamped;
       else st.httpPort = clamped;
+      scheduleStudioPersist();
       renderWorkspace();
       return;
     }
@@ -2247,6 +2381,9 @@ async function boot() {
       try {
         state.ui.settings = await callApi("getSettings");
         state.ui.update.autoCheck = state.ui.settings.autoCheckUpdate !== false;
+        if (state.ui.settings?.studio) {
+          applyPersistedStudio(state.ui.settings.studio);
+        }
       } catch (_) {}
     }
     state.devices = await callApi("listDevices");

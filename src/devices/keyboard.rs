@@ -65,7 +65,8 @@ pub fn decode_kb_config(buf: &[u8]) -> Value {
             "direction": b(4),
             "multiColor": b(5) != 0,
             "color": rgb_to_hex(b(6), b(7), b(8)),
-            "customGroup": clamp_u8(b(27) as i64, 0, 3),
+            "customGroup": clamp_u8(b(18) as i64, 0, 3),
+            "zzccGroup": clamp_u8(b(25) as i64, 0, 3),
         },
         "logo": {
             "mode": b(28),
@@ -129,7 +130,10 @@ pub fn apply_kb_config_patch(base: &[u8], patch: &Value) -> Vec<u8> {
             buf[8] = b;
         }
         if let Some(v) = l.get("customGroup").and_then(Value::as_i64) {
-            buf[27] = clamp_u8(v, 0, 3);
+            buf[18] = clamp_u8(v, 0, 3);
+        }
+        if let Some(v) = l.get("zzccGroup").and_then(Value::as_i64) {
+            buf[25] = clamp_u8(v, 0, 3);
         }
     }
 

@@ -39,6 +39,7 @@
     openUrl: (url) => safeInvoke("app_open_url", { url }),
     getSettings: () => safeInvoke("app_settings_get"),
     setSettings: (patch) => safeInvoke("app_settings_set", { patch }),
+    openDataDir: () => safeInvoke("app_open_data_dir"),
     listDevices: () => safeInvoke("device_list"),
     rescanDevices: () => safeInvoke("device_rescan"),
     wakeDevice: (id) => safeInvoke("device_wake", { id }),

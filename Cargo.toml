@@ -1,6 +1,6 @@
 [package]
 name = "redmagic-control"
-version = "0.6.0"
+version = "0.7.0"
 description = "REDMAGIC 外设控制中心 (GK001S / GS001S)"
 edition = "2021"
 

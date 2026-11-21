@@ -33,8 +33,8 @@ function pickColor(multi, hueOffset, baseHsl) {
   return bs < 12 ? hslCss(0, 0, bl) : hslCss(bh, Math.max(bs, 78), bl);
 }
 
-/* 计算单个键盘按键在时刻 t 的颜色与不透明度（严格对齐 Goper.exe 0x44bb20 各模式色彩能力） */
-const KB_FIXED_MULTI_MODES = new Set([3, 9, 11, 16, 17]); // 混彩 / 焰火 / 滚动 / 逐浪 / 极速：固件内置全彩光谱
+/* 计算单个键盘按键在时刻 t 的颜色与不透明度（严格对齐 Goper.exe 0x44bb20 各模式名称、方向与色彩能力） */
+const KB_FIXED_MULTI_MODES = new Set([3, 9, 11, 16, 17]); // 光谱 / 百花争艳 / 川流不息 / 众志成城 / 速度激情：固件内置全彩光谱
 const KB_SINGLE_ONLY_MODES = new Set([18]);               // 自定义：仅单色
 
 function evalKbKey(mode, nx, ny, t, baseHsl, multi, maxOp, dir = 0) {
@@ -44,59 +44,72 @@ function evalKbKey(mode, nx, ny, t, baseHsl, multi, maxOp, dir = 0) {
   const dirSign = dir ? -1 : 1;
 
   switch (mode) {
-    case 0: // 波浪（水平流动）
+    case 0: // 随波逐流（由左至右 / 由右至左）
       return { color: hueAt(nx * 360 - dirSign * t * 140), op: maxOp };
-    case 1: // 彩云（斜向柔和渐变）
+    case 1: // 彩云纷飞（由左至右 / 由右至左斜向流动）
       return { color: hueAt((nx * 0.7 + ny * 0.6) * 320 - dirSign * t * 100), op: maxOp * (0.72 + 0.28 * Math.sin(nx * 5 - dirSign * t * 2.5)) };
-    case 2: { // 环绕（中心旋转极角）
+    case 2: { // 峰回路转（逆时针 / 顺时针）
       const ang = (Math.atan2(ny - 0.5, nx - 0.5) * 180) / Math.PI;
-      return { color: hueAt(ang - dirSign * t * 160), op: maxOp };
+      return { color: hueAt(ang + dirSign * t * 160), op: maxOp };
     }
-    case 3: // 混彩（全局光谱缓慢流转）
+    case 3: // 光谱（全局光谱缓慢流转）
       return { color: hslCss(t * 70, 90, 56), op: maxOp };
     case 4: { // 呼吸
       const wave = 0.16 + 0.84 * (0.5 + 0.5 * Math.sin(t * 2.4));
       return { color: hueAt(t * 45), op: maxOp * wave };
     }
-    case 5: // 恒亮
+    case 5: // 常亮
     case 18: // 自定义
       return { color: hueAt(nx * 300), op: maxOp };
-    case 6: { // 涟漪（中心扩散同心圆）
+    case 6: { // 泛起涟漪（中心扩散同心圆）
       const dist = Math.hypot((nx - 0.5) * 2.2, (ny - 0.5) * 1.4);
       const ring = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(dist * 10 - t * 5));
       return { color: hueAt(dist * 240 - t * 140), op: maxOp * ring };
     }
-    case 8: // 游行
-    case 11: // 滚动
-    case 12: // 流光
-    case 16: // 逐浪
-    case 17: { // 极速
-      const spd = mode === 17 ? 5.5 : 3.2;
-      const band = Math.pow(0.5 + 0.5 * Math.sin(nx * 8 - dirSign * t * spd), 2);
-      return { color: hueAt(nx * 300 - dirSign * t * 180), op: maxOp * (0.22 + 0.78 * band) };
+    case 8: { // 奔逸绝尘（横向疾驰光带）
+      const band = Math.pow(0.5 + 0.5 * Math.sin(nx * 8 - t * 3.8), 2);
+      return { color: hueAt(nx * 300 - t * 180), op: maxOp * (0.2 + 0.8 * band) };
     }
-    case 15: { // 扫描（左右往返光束）
+    case 11: { // 川流不息（由上至下 / 由下至上）
+      const band = Math.pow(0.5 + 0.5 * Math.sin(ny * 7 - dirSign * t * 3.4), 2);
+      return { color: hueAt(ny * 320 - dirSign * t * 160), op: maxOp * (0.3 + 0.7 * band) };
+    }
+    case 12: { // 大鹏展翅（中轴向两侧展翼）
+      const wing = Math.abs(nx - 0.5) * 2;
+      const band = Math.pow(0.5 + 0.5 * Math.sin(wing * 7 - t * 3.5), 2);
+      return { color: hueAt(wing * 280 - t * 150), op: maxOp * (0.24 + 0.76 * band) };
+    }
+    case 15: { // 左右逢源（左右往返光束）
       const pos = 0.5 + 0.5 * Math.sin(t * 2.6);
       const d = Math.abs(nx - pos);
       const glow = Math.max(0, 1 - d * 5.5);
       return { color: hueAt(pos * 360), op: maxOp * (0.16 + 0.84 * glow) };
     }
-    case 9: // 焰火
-    case 10: // 星空
-    case 13: { // 卡通
+    case 16: { // 众志成城（多色分区律动）
+      const zone = Math.floor(nx * 4);
+      return { color: hslCss(zone * 85 + t * 55, 90, 56), op: maxOp * (0.72 + 0.28 * Math.sin(t * 2.8 + zone)) };
+    }
+    case 17: { // 速度激情（由内至外 / 由外至内）
+      const dist = Math.hypot((nx - 0.5) * 2.1, (ny - 0.5) * 1.5);
+      const pulse = Math.pow(0.5 + 0.5 * Math.sin(dist * 9 - dirSign * t * 5.2), 2);
+      return { color: hslCss(dist * 260 - dirSign * t * 200, 92, 56), op: maxOp * (0.24 + 0.76 * pulse) };
+    }
+    case 9: // 百花争艳
+    case 10: // 繁星点点
+    case 13: { // 厚积薄发
       const seed = Math.sin(nx * 91.7 + ny * 47.3) * 43758.5453;
       const phase = (seed - Math.floor(seed)) * Math.PI * 2;
       const tw = Math.pow(0.5 + 0.5 * Math.sin(t * 3.4 + phase), 3);
       return { color: hueAt(phase * 90 + t * 40), op: maxOp * (0.15 + 0.85 * tw) };
     }
-    case 14: { // 雨滴（按列下落）
+    case 14: { // 落雨纷纷（按列下落）
       const colPhase = Math.sin(nx * 67.3) * 10;
       const dropY = ((t * 0.9 + colPhase) % 1 + 1) % 1;
       const d = Math.abs(ny - dropY);
       const trail = d < 0.28 ? 1 - d / 0.28 : 0.14;
       return { color: hueAt(nx * 320 + t * 50), op: maxOp * trail };
     }
-    default: // 触发等
+    default: // 踏雪无痕等
       return { color: hueAt(nx * 280), op: maxOp * 0.88 };
   }
 }
@@ -195,7 +208,7 @@ export class LightingAnimator {
     paint(0.6);
 
     const kbKeysStatic = !showKeys || cfg.light.mode === 5 || cfg.light.mode === 18 || cfg.light.mode === 19 || kbOp <= 0.01;
-    const kbLogoStatic = cfg.logo.mode === 3 || cfg.logo.mode === 8 || logoOp <= 0.01;
+    const kbLogoStatic = cfg.logo.mode === 3 || cfg.logo.mode === 4 || cfg.logo.mode === 8 || logoOp <= 0.01;
     const isStatic = this._reduced
       || (device.kind === "keyboard" && kbKeysStatic && kbLogoStatic)
       || (device.kind === "mouse" && (cfg.light.mode === 3 || cfg.light.mode === 4 || msOp <= 0.01));

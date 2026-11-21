@@ -273,16 +273,46 @@ function renderDynamicLightControls({ prefix, isKb, isLogo, activeMode, cfg }) {
       </div>`);
   }
 
-  // 2. 灯效方向（仅波浪/彩云/环绕/滚动/极速等有方向位模式展示）
+  // 2. 灯效方向（严格对齐 Goper.exe 各模式方向文案：左/右、逆/顺时针、上/下、内/外）
   if (isKb && !isLogo && activeMode.dir) {
     const dir = Number(cfg.direction) || 0;
+    const labels = Array.isArray(activeMode.dirLabels) && activeMode.dirLabels.length === 2
+      ? activeMode.dirLabels
+      : ["由左至右", "由右至左"];
     blocks.push(`
       <div class="stack-sm">
-        <span class="field-label">流动方向</span>
+        <span class="field-label">灯效方向</span>
         <div class="seg is-full">
-          <button type="button" class="seg-btn" data-kb-cfg="light.direction" data-val="0" aria-pressed="${dir === 0}">左 → 右</button>
-          <button type="button" class="seg-btn" data-kb-cfg="light.direction" data-val="1" aria-pressed="${dir === 1}">右 → 左</button>
+          <button type="button" class="seg-btn" data-kb-cfg="light.direction" data-val="0" aria-pressed="${dir === 0}">${esc(labels[0])}</button>
+          <button type="button" class="seg-btn" data-kb-cfg="light.direction" data-val="1" aria-pressed="${dir === 1}">${esc(labels[1])}</button>
         </div>
+      </div>`);
+  }
+
+  // 2b. 众志成城 4 组子模式 (mode 16, buf[25]) 或 自定义 4 组板载逐键分组 (mode 18, buf[18])
+  if (isKb && !isLogo && activeMode.zzccGroup) {
+    const grp = Number(cfg.zzccGroup) || 0;
+    const groupBtns = [0, 1, 2, 3].map((g) =>
+      `<button type="button" class="seg-btn" data-kb-cfg="light.zzccGroup" data-val="${g}" aria-pressed="${grp === g}">第${["一", "二", "三", "四"][g]}组</button>`
+    ).join("");
+    blocks.push(`
+      <div class="stack-sm">
+        <span class="field-label">众志成城分组</span>
+        <div class="seg is-full">${groupBtns}</div>
+      </div>`);
+  }
+  if (isKb && !isLogo && activeMode.customGroup) {
+    const grp = Number(cfg.customGroup) || 0;
+    const groupBtns = [0, 1, 2, 3].map((g) =>
+      `<button type="button" class="seg-btn" data-kb-cfg="light.customGroup" data-val="${g}" aria-pressed="${grp === g}">第${["一", "二", "三", "四"][g]}组</button>`
+    ).join("");
+    blocks.push(`
+      <div class="stack-sm">
+        <div class="row">
+          <span class="field-label">板载自定义分组（OP 0x0b 断电持久）</span>
+          <button type="button" class="btn btn-secondary btn-sm" id="light-goto-paint-btn">前往逐键涂色</button>
+        </div>
+        <div class="seg is-full">${groupBtns}</div>
       </div>`);
   }
 
@@ -1197,11 +1227,13 @@ export function renderAbout(meta, update, settings) {
   const checking = Boolean(update?.checking);
   const info = update?.info || null;
   const err = update?.error || "";
-  const cfg = settings || { closeToTray: true, startMinimized: true, autoCheckUpdate: true, autostart: false };
+  const cfg = settings || { closeToTray: true, startMinimized: true, autoCheckUpdate: true, autoResumeStudio: true, autostart: false };
   const autoCheck = cfg.autoCheckUpdate !== false;
   const closeToTray = cfg.closeToTray !== false;
   const autostart = Boolean(cfg.autostart);
   const startMinimized = cfg.startMinimized !== false;
+  const autoResumeStudio = cfg.autoResumeStudio !== false;
+  const settingsPath = cfg.settingsPath || "%LOCALAPPDATA%\\com.redmagic.control.rs\\settings.json";
 
   let statusClass = "is-idle";
   let statusIcon = "info";
@@ -1291,8 +1323,16 @@ export function renderAbout(meta, update, settings) {
 
         <dl class="spec-list">
           <div class="spec-item"><dt>支持外设</dt><dd>GK001S 键盘 · GS001S 鼠标</dd></div>
-          <div class="spec-item"><dt>原生通信栈</dt><dd class="mono">Win32 HID · BLE · WinHTTP</dd></div>
+          <div class="spec-item"><dt>硬件设置存储</dt><dd>设备板载 Flash（断电持久）</dd></div>
         </dl>
+
+        <div class="about-storage-box">
+          <div class="about-storage-copy">
+            <strong>本地配置自动持久化</strong>
+            <span class="mono" title="${esc(settingsPath)}">settings.json（软件偏好 + 灯效编程脚本/图层/端口）</span>
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm nowrap" id="about-open-data-dir-btn">打开配置目录</button>
+        </div>
       </section>
 
       <section class="card">
@@ -1344,6 +1384,14 @@ export function renderAbout(meta, update, settings) {
               <small>写入当前用户 Windows 启动项 (HKCU\\Run)，无需管理员权限</small>
             </div>
             ${toggleSwitch("about-autostart", autostart, 'id="about-autostart-toggle"')}
+          </div>
+
+          <div class="toggle-row is-compact">
+            <div class="toggle-copy">
+              <strong>启动时自动恢复上次推流</strong>
+              <small>重启或开机静默进托盘后自动恢复上次的灯效编程推流与本地接口</small>
+            </div>
+            ${toggleSwitch("about-auto-resume", autoResumeStudio, 'id="about-auto-resume-toggle"')}
           </div>
 
           <div class="toggle-row is-compact">

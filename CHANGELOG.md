@@ -5,6 +5,21 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-21
+
+### Fixed
+- **Aligned all keyboard, Logo, and mouse lighting mode names, IDs & directions with official Goper (`default_light.json` + `lan_cn.xml` + `Goper.exe`)**:
+  - Updated all 20 `GK001S` keyboard lighting mode names to exact official names: `随波逐流`, `彩云纷飞`, `峰回路转`, `光谱`, `呼吸`, `常亮`, `泛起涟漪`, `踏雪无痕`, `奔逸绝尘`, `百花争艳`, `繁星点点`, `川流不息`, `大鹏展翅`, `厚积薄发`, `落雨纷纷`, `左右逢源`, `众志成城`, `速度激情`, `自定义`, `全灭`.
+  - Fixed per-mode direction labels to match hardware behavior (`由左至右/由右至左`, `逆时针/顺时针`, `由上至下/由下至上`, `由内至外/由外至内`) and synchronized Canvas preview animations.
+  - Fixed `GK001S` top Logo strip `全灭` hardware mode ID (`8` → `4`) and `GS001S` mouse mode `1` official name (`流光模式`).
+  - Fixed `customGroup` hardware byte offset (`buf[18]`) and added `zzccGroup` (`buf[25]`) 4-group selector for `众志成城` (`mode 16`) & `自定义` (`mode 18`).
+
+### Added
+- **Complete atomic settings & Studio persistence (`%LOCALAPPDATA%\com.redmagic.control.rs\settings.json`)**:
+  - Automatically persists all RGB Studio state (selected mode/preset, custom JS shader code, `p1/p2/p3` sliders, 4-layer mixer config, brightness, Logo sync, paint group/color, UDP/HTTP ports) and skipped update version via atomic `.tmp` + rename writes — surviving tray suspension (WebView2 destruction) and restarts with zero loss.
+  - Added **启动时自动恢复上次推流** (`autoResumeStudio: true`): automatically resumes the last active native RGB preset/multi-layer stream or local external API server on startup and `--autostart` silent tray boot.
+  - Added one-click **打开配置目录** button in **关于软件** to inspect or back up `settings.json`.
+
 ## [0.6.0] - 2026-11-21
 
 ### Added

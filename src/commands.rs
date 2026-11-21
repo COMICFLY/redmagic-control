@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::devices::catalog::get_metadata_json;
 use crate::devices::manager::{DeviceDescriptor, DeviceManager};
-use crate::settings::{AppSettingsPatch, SettingsStore};
+use crate::settings::{open_directory_in_explorer, AppSettingsPatch, SettingsStore};
 use crate::studio::runner::NativeStreamConfig;
 use crate::studio::server::{DEFAULT_HTTP_PORT, DEFAULT_UDP_PORT};
 use crate::studio::StudioEngine;
@@ -71,6 +71,13 @@ pub fn app_settings_set(
 ) -> Result<Value, String> {
     let view = state.settings.apply_patch(patch)?;
     Ok(serde_json::to_value(view).unwrap_or_else(|_| json!({})))
+}
+
+#[tauri::command]
+pub fn app_open_data_dir(state: State<'_, AppState>) -> Result<Value, String> {
+    let dir = state.settings.data_dir();
+    open_directory_in_explorer(&dir)?;
+    Ok(json!({ "ok": true, "path": dir.to_string_lossy() }))
 }
 
 #[tauri::command]
@@ -379,10 +386,12 @@ pub async fn studio_native_start(
 ) -> Result<Value, String> {
     let mgr = state.manager.clone();
     let studio = state.studio.clone();
+    let settings = state.settings.clone();
     tokio::task::spawn_blocking(move || {
         if studio.server.is_running() {
             studio.server.stop(&mgr);
         }
+        let cfg_save = config.clone();
         let st = studio.runner.start(
             mgr,
             id,
@@ -391,10 +400,12 @@ pub async fn studio_native_start(
             studio.keys.clone(),
             config,
         )?;
+        settings.save_native_config(&cfg_save, true);
+        settings.set_studio_running(Some(true), Some(false));
         Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
     })
     .await
-    .map_err(|e| format!("启动纯 Rust 后台推流异常: {e}"))?
+    .map_err(|e| format!("启动后台推流异常: {e}"))?
 }
 
 #[tauri::command]
@@ -404,7 +415,9 @@ pub async fn studio_native_update(
 ) -> Result<Value, String> {
     let mgr = state.manager.clone();
     let studio = state.studio.clone();
+    let settings = state.settings.clone();
     tokio::task::spawn_blocking(move || {
+        let cfg_save = config.clone();
         let st = studio.runner.update_config(
             &mgr,
             &studio.audio,
@@ -412,6 +425,7 @@ pub async fn studio_native_update(
             &studio.keys,
             config,
         )?;
+        settings.save_native_config(&cfg_save, true);
         Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
     })
     .await
@@ -422,8 +436,10 @@ pub async fn studio_native_update(
 pub async fn studio_native_stop(state: State<'_, AppState>) -> Result<Value, String> {
     let mgr = state.manager.clone();
     let studio = state.studio.clone();
+    let settings = state.settings.clone();
     tokio::task::spawn_blocking(move || {
         let st = studio.runner.stop(&mgr);
+        settings.set_studio_running(Some(false), None);
         Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
     })
     .await
@@ -486,6 +502,7 @@ pub async fn studio_server_start(
 ) -> Result<Value, String> {
     let mgr = state.manager.clone();
     let studio = state.studio.clone();
+    let settings = state.settings.clone();
     let up = udp_port.unwrap_or(DEFAULT_UDP_PORT);
     let hp = http_port.unwrap_or(DEFAULT_HTTP_PORT);
     let logo = include_logo.unwrap_or(true);
@@ -494,6 +511,7 @@ pub async fn studio_server_start(
             studio.runner.stop(&mgr);
         }
         let st = studio.server.start(mgr, id, up, hp, logo)?;
+        settings.set_studio_running(Some(false), Some(true));
         Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
     })
     .await
@@ -504,8 +522,10 @@ pub async fn studio_server_start(
 pub async fn studio_server_stop(state: State<'_, AppState>) -> Result<Value, String> {
     let mgr = state.manager.clone();
     let srv = state.studio.server.clone();
+    let settings = state.settings.clone();
     tokio::task::spawn_blocking(move || {
         let st = srv.stop(&mgr);
+        settings.set_studio_running(None, Some(false));
         Ok::<Value, String>(serde_json::to_value(st).unwrap_or_else(|_| json!({})))
     })
     .await
