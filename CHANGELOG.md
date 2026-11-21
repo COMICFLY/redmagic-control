@@ -5,6 +5,13 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-11-21
+
+### Fixed
+- **Fixed frozen mouse LED preview animation (`lighting.js`, `stage.js`, `styles.css`)**:
+  - Fixed a regression in `LightingAnimator.start()` where checking keyboard `cfg.logo.mode` unconditionally on mouse devices (which have no `cfg.logo`) threw a `TypeError` right after painting the initial frame, preventing the animation loop from ever starting on mouse Overview and Lighting pages.
+  - Upgraded mouse 3-zone LED preview (scroll wheel, V-wing guides, RedMagic tail logo) from `<svg>` DOM updates to a single lightweight `179×300` `<canvas class="ms-led-canvas">` (`drawMouseLedCanvas`) with soft neon glow and zero DOM churn.
+
 ## [0.7.1] - 2026-11-21
 
 ### Fixed & Enhanced

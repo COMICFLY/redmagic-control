@@ -1133,16 +1133,13 @@ button {
   pointer-events: none;
 }
 
-.ms-led-layer {
+.ms-led-canvas {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
+  display: block;
   pointer-events: none;
-}
-
-.ms-led-zone {
-  will-change: opacity;
 }
 
 .dpi-mini-dot {

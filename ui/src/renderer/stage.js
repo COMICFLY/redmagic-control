@@ -239,6 +239,88 @@ export function renderKeyboardStage(device, hwState, { interactiveKeys = false, 
   `;
 }
 
+/**
+ * 单层 Canvas 渲染鼠标 3 处真实透光灯区（滚轮两侧透光缝 / 中段 V 型双翼 / 尾部红魔 Logo 徽标）。
+ * 与键盘灯效预览保持一致，零 DOM 重排并自带柔和霓虹光晕。
+ * zoneStyles: [{ color, op }, { color, op }, { color, op }]
+ */
+export function drawMouseLedCanvas(ctx, zoneStyles) {
+  ctx.clearRect(0, 0, 179, 300);
+  if (!zoneStyles || zoneStyles.length < 3) return;
+  const hasRoundRect = typeof ctx.roundRect === "function";
+  const drawRRect = (x, y, w, h, r) => {
+    ctx.beginPath();
+    if (hasRoundRect) ctx.roundRect(x, y, w, h, r);
+    else ctx.rect(x, y, w, h);
+    ctx.fill();
+  };
+
+  // 1. 滚轮两侧透光缝（x=81..99, y=32..72）
+  const z0 = zoneStyles[0];
+  if (z0 && z0.op > 0.01) {
+    ctx.save();
+    ctx.fillStyle = z0.color;
+    ctx.shadowColor = z0.color;
+    ctx.shadowBlur = 7;
+    ctx.globalAlpha = z0.op * 0.34;
+    drawRRect(84.5, 36, 12, 32, 4);
+    ctx.globalAlpha = z0.op;
+    drawRRect(81, 33, 3.2, 38, 1.6);
+    drawRRect(96.8, 33, 3.2, 38, 1.6);
+    ctx.restore();
+  }
+
+  // 2. 中段左右 V 型导光条（38,135.5 -> 77,154 与 143,135.5 -> 104,154）
+  const z1 = zoneStyles[1];
+  if (z1 && z1.op > 0.01) {
+    ctx.save();
+    ctx.strokeStyle = z1.color;
+    ctx.lineCap = "round";
+    ctx.shadowColor = z1.color;
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.moveTo(38, 135.5);
+    ctx.lineTo(77, 154);
+    ctx.moveTo(143, 135.5);
+    ctx.lineTo(104, 154);
+    ctx.globalAlpha = z1.op * 0.32;
+    ctx.lineWidth = 8.4;
+    ctx.stroke();
+    ctx.globalAlpha = z1.op;
+    ctx.lineWidth = 4.2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 3. 尾部红魔 Logo 徽标（bbox x=79..102, y=240..266）
+  const z2 = zoneStyles[2];
+  if (z2 && z2.op > 0.01) {
+    ctx.save();
+    ctx.fillStyle = z2.color;
+    ctx.strokeStyle = z2.color;
+    ctx.lineJoin = "round";
+    ctx.shadowColor = z2.color;
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.moveTo(80, 245);
+    ctx.lineTo(86, 241);
+    ctx.lineTo(89, 250);
+    ctx.lineTo(92, 250);
+    ctx.lineTo(95, 241);
+    ctx.lineTo(101, 245);
+    ctx.lineTo(98, 257);
+    ctx.lineTo(90.5, 266);
+    ctx.lineTo(83, 257);
+    ctx.closePath();
+    ctx.globalAlpha = z2.op * 0.32;
+    ctx.lineWidth = 3.6;
+    ctx.stroke();
+    ctx.globalAlpha = z2.op;
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
 export function renderMouseStage(device, hwState, meta, { interactiveKeys = false, selectedSlot = null, showLightPreview = false } = {}) {
   const cfg = hwState?.config;
   const activeStage = cfg?.dpiStages?.[cfg?.performance?.activeDpi ?? 0];
@@ -253,29 +335,9 @@ export function renderMouseStage(device, hwState, meta, { interactiveKeys = fals
     return `<button type="button" class="ms-pin mono${isSel ? " is-selected" : ""}${isMod ? " is-modified" : ""}" data-select-slot="${s.slot}" style="left:${s.x}%;top:${s.y}%" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${isSel}">${esc(s.code)}</button>`;
   }).join("") : "";
 
-  // 鼠标三处真实透光灯区（使用双层矢量光晕替代昂贵的 feGaussianBlur 滤镜，保持清晰透光质感）
-  const ledZonesHtml = showLightPreview ? `
-    <svg class="ms-led-layer" viewBox="0 0 179 300" aria-hidden="true">
-      <!-- 1. 滚轮两侧透光缝（x=81..99, y=32..72） -->
-      <g class="ms-led-zone ms-led-wheel">
-        <rect x="79.5" y="31.5" width="6.2" height="41" rx="3.1" fill="var(--zone-color)" fill-opacity="0.28" />
-        <rect x="95.3" y="31.5" width="6.2" height="41" rx="3.1" fill="var(--zone-color)" fill-opacity="0.28" />
-        <rect x="81" y="33" width="3.2" height="38" rx="1.6" fill="var(--zone-color)" />
-        <rect x="96.8" y="33" width="3.2" height="38" rx="1.6" fill="var(--zone-color)" />
-        <rect x="84.5" y="36" width="12" height="32" rx="4" fill="var(--zone-color)" fill-opacity="0.34" />
-      </g>
-      <!-- 2. 中段左右 V 型导光条（实测红魔导光槽 38,135 -> 78,154 与 143,135 -> 103,154） -->
-      <g class="ms-led-zone ms-led-wing">
-        <path d="M 38 135.5 L 77 154" stroke="var(--zone-color)" stroke-width="8.5" stroke-opacity="0.26" stroke-linecap="round" fill="none" />
-        <path d="M 143 135.5 L 104 154" stroke="var(--zone-color)" stroke-width="8.5" stroke-opacity="0.26" stroke-linecap="round" fill="none" />
-        <path d="M 38 135.5 L 77 154" stroke="var(--zone-color)" stroke-width="4.2" stroke-linecap="round" fill="none" />
-        <path d="M 143 135.5 L 104 154" stroke="var(--zone-color)" stroke-width="4.2" stroke-linecap="round" fill="none" />
-      </g>
-      <!-- 3. 尾部红魔 Logo 徽标（实测亮区 bbox x=79..102, y=240..266） -->
-      <g class="ms-led-zone ms-led-logo">
-        <path d="M 80 245 L 86 241 L 89 250 L 92 250 L 95 241 L 101 245 L 98 257 L 90.5 266 L 83 257 Z" fill="var(--zone-color)" stroke="var(--zone-color)" stroke-width="3.6" stroke-opacity="0.28" stroke-linejoin="round" />
-      </g>
-    </svg>` : "";
+  const ledZonesHtml = showLightPreview
+    ? `<canvas class="ms-led-canvas" width="179" height="300" aria-hidden="true"></canvas>`
+    : "";
 
   return `
     <div class="stage-box">
