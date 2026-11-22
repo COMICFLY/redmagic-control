@@ -3110,6 +3110,51 @@ input[type="range"] {
   padding-top: 4px;
 }
 
+.update-progress-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--glass-nested);
+  border: 1px solid rgba(229, 57, 69, 0.36);
+}
+
+.update-progress-msg {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.update-progress-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.update-error-box {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: rgba(229, 57, 69, 0.14);
+  border: 1px solid rgba(229, 57, 69, 0.45);
+}
+
+.update-error-box strong {
+  font-size: 12.5px;
+  color: #ff7a84;
+}
+
+.update-error-box span {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
 /* 托盘隐藏 / 最小化期间彻底停止 GPU 图层与动画合成 */
 body.is-tray-hidden .app-shell {
   display: none !important;

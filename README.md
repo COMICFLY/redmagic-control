@@ -14,9 +14,9 @@
 | :---: | :---: |
 | ![GK001S 灯效编程工作室](docs/screenshots/kb-studio.png) | ![GK001S 板载逐键涂色](docs/screenshots/kb-paint.png) |
 
-| GS001S 鼠标 · 5 档 DPI 与传感器控制 | 关于软件与在线更新 |
+| GS001S 鼠标 · 5 档 DPI 与传感器控制 | 关于软件与一键自动更新 |
 | :---: | :---: |
-| ![GS001S 鼠标概览与 DPI](docs/screenshots/ms-overview.png) | ![关于软件与在线更新](docs/screenshots/app-about.png) |
+| ![GS001S 鼠标概览与 DPI](docs/screenshots/ms-overview.png) | ![关于软件与一键自动更新](docs/screenshots/app-about.png) |
 
 ---
 

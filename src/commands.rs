@@ -17,7 +17,8 @@ use crate::studio::runner::NativeStreamConfig;
 use crate::studio::server::{DEFAULT_HTTP_PORT, DEFAULT_UDP_PORT};
 use crate::studio::StudioEngine;
 use crate::updater::{
-    check_latest_release, open_external_url, AUTHOR_URL, RELEASES_URL, REPO_OWNER, REPO_URL,
+    check_latest_release, download_and_stage_update, launch_staged_updater, open_external_url,
+    UpdateProgress, AUTHOR_URL, RELEASES_URL, REPO_OWNER, REPO_URL,
 };
 
 pub struct AppState {
@@ -25,6 +26,9 @@ pub struct AppState {
     pub studio: StudioEngine,
     pub settings: SettingsStore,
     pub pending_auto_resume: Arc<AtomicBool>,
+    pub force_quit: Arc<AtomicBool>,
+    pub update_in_progress: Arc<AtomicBool>,
+    pub update_cancel: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -54,6 +58,108 @@ pub async fn app_check_update() -> Result<Value, String> {
     })
     .await
     .map_err(|e| format!("检查更新任务异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn app_install_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    download_url: String,
+    expected_size: Option<u64>,
+) -> Result<Value, String> {
+    if state
+        .update_in_progress
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("更新正在下载或安装中，请稍候".to_string());
+    }
+    state.update_cancel.store(false, Ordering::SeqCst);
+
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            state.update_in_progress.store(false, Ordering::SeqCst);
+            return Err(format!("无法定位当前程序路径: {e}"));
+        }
+    };
+
+    let cancel = state.update_cancel.clone();
+    let app_for_prog = app.clone();
+    let exe_for_dl = current_exe.clone();
+    let dl_res = tokio::task::spawn_blocking(move || {
+        download_and_stage_update(
+            &download_url,
+            expected_size,
+            &exe_for_dl,
+            env!("CARGO_PKG_VERSION"),
+            &cancel,
+            |prog| {
+                let _ = app_for_prog.emit("update:progress", &prog);
+            },
+        )
+    })
+    .await
+    .map_err(|e| format!("下载更新任务异常: {e}"))?;
+
+    let staged_path = match dl_res {
+        Ok(p) => p,
+        Err(e) => {
+            let canceled = state.update_cancel.load(Ordering::Relaxed);
+            state.update_in_progress.store(false, Ordering::SeqCst);
+            let _ = app.emit(
+                "update:progress",
+                &UpdateProgress {
+                    stage: if canceled { "canceled" } else { "error" }.to_string(),
+                    downloaded: 0,
+                    total: expected_size,
+                    pct: 0,
+                    speed_bps: 0,
+                    message: e.clone(),
+                },
+            );
+            return Err(e);
+        }
+    };
+
+    let _ = app.emit(
+        "update:progress",
+        &UpdateProgress {
+            stage: "installing".to_string(),
+            downloaded: expected_size.unwrap_or(0),
+            total: expected_size,
+            pct: 100,
+            speed_bps: 0,
+            message: "校验通过，正在替换程序并自动重启…".to_string(),
+        },
+    );
+
+    // 停机释放所有 HID 会话与推流线程，并置位强制退出标志防止被托盘常驻拦截
+    state.force_quit.store(true, Ordering::SeqCst);
+    state.studio.shutdown(&state.manager);
+    state.manager.close_all_sessions();
+
+    if let Err(e) = launch_staged_updater(&staged_path, &current_exe, std::process::id()) {
+        state.force_quit.store(false, Ordering::SeqCst);
+        state.update_in_progress.store(false, Ordering::SeqCst);
+        let _ = fs::remove_file(&staged_path);
+        return Err(e);
+    }
+
+    // 延迟 180ms 退出，确保前端收到成功响应并渲染重启提示，同时给 helper 进程留出交接窗口
+    let app_for_exit = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(180));
+        app_for_exit.exit(0);
+    });
+
+    Ok(json!({ "ok": true, "restarting": true }))
+}
+
+#[tauri::command]
+pub fn app_cancel_update(state: State<'_, AppState>) -> Value {
+    state.update_cancel.store(true, Ordering::SeqCst);
+    json!({ "ok": true })
 }
 
 #[tauri::command]

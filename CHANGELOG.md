@@ -5,6 +5,14 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-11-22
+
+### Added
+- **One-click in-place self-updater (`src/updater.rs`, `src/commands.rs`, `src/main.rs`, `panels.js`, `app.js`)**:
+  - Added streaming HTTPS release download via Windows WinHTTP (`app_install_update` / `app_cancel_update`) with real-time progress bar (`MB / total · speed · %`) and download cancellation inside both the update modal and the **关于** page.
+  - Strictly validates official GitHub HTTPS release URLs, verifies exact byte length and Windows PE executable headers (`MZ` + `PE\0\0`) before staging, and rejects read-only directories up front with clear guidance.
+  - Performs zero-console-flash atomic replacement via the staged binary's native `--apply-update` handoff (waits for old PID exit, creates `.old` rollback backup, atomically swaps the executable, restarts the updated app with race-free single-instance handoff, and cleans up temporary artifacts automatically). All `settings.json` preferences and pinned Studio streams carry over seamlessly.
+
 ## [0.7.4] - 2026-11-22
 
 ### Fixed & Improved

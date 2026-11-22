@@ -36,6 +36,9 @@
   window.rm = {
     getMeta: () => safeInvoke("app_meta"),
     checkUpdate: () => safeInvoke("app_check_update"),
+    installUpdate: (downloadUrl, expectedSize = null) =>
+      safeInvoke("app_install_update", { downloadUrl, expectedSize }),
+    cancelUpdate: () => safeInvoke("app_cancel_update"),
     openUrl: (url) => safeInvoke("app_open_url", { url }),
     getSettings: () => safeInvoke("app_settings_get"),
     setSettings: (patch) => safeInvoke("app_settings_set", { patch }),
@@ -82,6 +85,7 @@
     importStudioPreset: () => safeInvoke("studio_import_preset"),
     hideToTray: () => safeInvoke("app_hide_to_tray"),
     onScreenProgress: (cb) => bindEvent("screen:progress", cb),
+    onUpdateProgress: (cb) => bindEvent("update:progress", cb),
     onDeviceEvent: (cb) => bindEvent("device:event", cb),
     onStudioStopped: (cb) => bindEvent("studio:stopped", cb),
     onTrayHidden: (cb) => bindEvent("studio:tray-hidden", cb),

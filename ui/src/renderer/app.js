@@ -1,7 +1,7 @@
 /* 轻量前端主控制器：统一状态、IPC 驱动、键盘物理录入与实时硬件同步。 */
 
 import { icon } from "./icons.js";
-import { renderConnectionBanner, renderPageTelemetry, renderOverview, renderLighting, renderKeymap, renderScreen, renderHardware, renderStudio, renderAbout, renderUpdateModal } from "./panels.js";
+import { renderConnectionBanner, renderPageTelemetry, renderOverview, renderLighting, renderKeymap, renderScreen, renderHardware, renderStudio, renderAbout, renderUpdateModal, formatUpdateProgressMeta } from "./panels.js";
 import { renderBatteryGauge, renderConnectionBadge } from "./stage.js";
 import { LightingAnimator } from "./lighting.js";
 import {
@@ -88,6 +88,9 @@ const state = {
     },
     update: {
       checking: false,
+      installing: false,
+      installError: "",
+      progress: null,
       info: null,
       error: "",
       modalOpen: false,
@@ -572,6 +575,79 @@ function renderUpdateModalOverlay() {
   }
   el.hidden = false;
   el.innerHTML = renderUpdateModal(upd);
+}
+
+function patchUpdateProgressDom(prog) {
+  const pct = Math.max(0, Math.min(100, Number(prog?.pct) || 0));
+  const msg = prog?.message || "正在下载更新…";
+  const meta = formatUpdateProgressMeta(prog);
+  for (const el of document.querySelectorAll(".js-update-prog-bar")) {
+    el.style.width = `${pct}%`;
+  }
+  for (const el of document.querySelectorAll(".js-update-prog-msg")) {
+    el.textContent = msg;
+  }
+  for (const el of document.querySelectorAll(".js-update-prog-pct")) {
+    el.textContent = meta;
+  }
+}
+
+async function startAutoUpdate() {
+  const upd = state.ui.update;
+  const info = upd.info;
+  if (upd.installing || !info?.downloadUrl) return;
+  if (!window.rm?.installUpdate) {
+    await openExternalUrl(info.downloadUrl || info.releaseUrl);
+    return;
+  }
+  await scheduleStudioPersist(true);
+  upd.installing = true;
+  upd.installError = "";
+  upd.progress = {
+    stage: "connecting",
+    downloaded: 0,
+    total: info.assetSize || null,
+    pct: 0,
+    speedBps: 0,
+    message: "正在连接 GitHub 下载服务器…",
+  };
+  renderUpdateModalOverlay();
+  if (state.tab === "about") renderWorkspace();
+
+  try {
+    await callApi("installUpdate", info.downloadUrl, info.assetSize || null);
+    // 后端校验通过后会主动退出当前进程并由新版接管重启，此时保持 installing 锁定状态即可
+    upd.progress = {
+      stage: "installing",
+      downloaded: info.assetSize || 0,
+      total: info.assetSize || null,
+      pct: 100,
+      speedBps: 0,
+      message: "校验通过，正在自动替换并重启新版本…",
+    };
+    renderUpdateModalOverlay();
+    if (state.tab === "about") renderWorkspace();
+  } catch (err) {
+    upd.installing = false;
+    const msg = err.message || "下载或安装更新失败";
+    if (msg.includes("已取消")) {
+      upd.installError = "";
+      toast("已取消更新下载", "随时可在「关于」页面重新发起自动更新");
+    } else {
+      upd.installError = msg;
+      toast("自动更新失败", msg, true);
+    }
+    upd.progress = null;
+    renderUpdateModalOverlay();
+    if (state.tab === "about") renderWorkspace();
+  }
+}
+
+async function cancelAutoUpdate() {
+  if (!state.ui.update.installing) return;
+  try {
+    await callApi("cancelUpdate");
+  } catch (_) {}
 }
 
 async function checkForUpdates({ silent = false, forceModal = false } = {}) {
@@ -1094,26 +1170,39 @@ function bindEvents() {
 
   // 更新提示弹窗交互
   $("#update-modal")?.addEventListener("click", async (e) => {
+    const upd = state.ui.update;
+    const locked = upd.installing && ["verifying", "installing"].includes(upd.progress?.stage);
     if (e.target.id === "update-modal") {
-      state.ui.update.modalOpen = false;
+      if (locked) return;
+      upd.modalOpen = false;
       renderUpdateModalOverlay();
       return;
     }
     const btn = e.target.closest("button");
     if (!btn) return;
+    if (btn.dataset.cancelUpdate) {
+      await cancelAutoUpdate();
+      return;
+    }
+    if (btn.id === "update-modal-install") {
+      await startAutoUpdate();
+      return;
+    }
     if (btn.id === "update-modal-close" || btn.id === "update-modal-later") {
-      state.ui.update.modalOpen = false;
+      if (locked) return;
+      upd.modalOpen = false;
       renderUpdateModalOverlay();
       return;
     }
     if (btn.id === "update-modal-skip") {
-      const ver = state.ui.update.info?.latestVersion;
+      if (upd.installing) return;
+      const ver = upd.info?.latestVersion;
       if (ver) {
         localStorage.setItem("rm_skipped_version", ver);
         if (state.ui.settings) state.ui.settings.skippedUpdateVersion = ver;
         window.rm?.setSettings?.({ skippedUpdateVersion: ver }).catch(() => {});
       }
-      state.ui.update.modalOpen = false;
+      upd.modalOpen = false;
       renderUpdateModalOverlay();
       toast("已跳过此版本提醒", ver ? `v${ver} 将不再自动弹窗，仍可在「关于」手动更新` : "");
       return;
@@ -1808,6 +1897,14 @@ function bindEvents() {
       toast("已复制项目仓库地址", url);
       return;
     }
+    if (el.dataset.cancelUpdate) {
+      await cancelAutoUpdate();
+      return;
+    }
+    if (el.id === "about-install-update-btn") {
+      await startAutoUpdate();
+      return;
+    }
     if (el.id === "about-check-update-btn") {
       await checkForUpdates({ silent: false, forceModal: true });
       return;
@@ -2280,8 +2377,11 @@ function bindEvents() {
   // 键盘物理录入目标键 + Escape 关闭弹窗 + 屏蔽浏览器调试/刷新快捷键 + 小屏页面 Ctrl+V 快捷粘贴图片
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && state.ui.update.modalOpen) {
-      state.ui.update.modalOpen = false;
-      renderUpdateModalOverlay();
+      const locked = state.ui.update.installing && ["verifying", "installing"].includes(state.ui.update.progress?.stage);
+      if (!locked) {
+        state.ui.update.modalOpen = false;
+        renderUpdateModalOverlay();
+      }
       return;
     }
     if (state.ui.capturingKey) {
@@ -2333,6 +2433,18 @@ async function boot() {
     const txt = $("#screen-upload-pct");
     if (bar) bar.style.width = `${prog.pct}%`;
     if (txt) txt.textContent = `${prog.pct}%`;
+  });
+  window.rm?.onUpdateProgress?.((prog) => {
+    if (!prog) return;
+    const upd = state.ui.update;
+    const prevStage = upd.progress?.stage || "";
+    upd.progress = prog;
+    if (prog.stage === "downloading" && prevStage === "downloading") {
+      patchUpdateProgressDom(prog);
+      return;
+    }
+    renderUpdateModalOverlay();
+    if (state.tab === "about") renderWorkspace();
   });
   window.rm?.onDeviceEvent?.(async (evt) => {
     if (!evt || state.ui.screenUploading) return;
@@ -2550,18 +2662,18 @@ async function boot() {
     const isScriptedView = Boolean(initTab || initDev);
     if (mockUpd) {
       state.ui.update.info = {
-        currentVersion: state.meta?.version || "0.5.0",
-        latestVersion: "0.6.0",
-        tagName: "v0.6.0",
+        currentVersion: state.meta?.version || "0.7.4",
+        latestVersion: "0.8.0",
+        tagName: "v0.8.0",
         hasUpdate: true,
-        releaseName: "REDMAGIC Control v0.6.0 — 性能优化与新功能预览",
-        releaseNotes: "## 更新亮点\n- 新增 **关于软件** 页面、作者名片与项目快速入口\n- 接入 Windows 原生 `WinHTTP` 自动检查 GitHub Releases 更新\n- 发现新版本时自动弹出毛玻璃更新提醒并支持一键直链下载",
+        releaseName: "REDMAGIC Control v0.8.0 — 一键自动更新",
+        releaseNotes: "## 更新亮点\n- 新增 **一键自动更新**：支持直连 GitHub Releases 流式下载、完整性校验、原位自动替换并无缝重启\n- 保留全部本地配置与固定推流方案，无需手动覆盖文件",
         releaseUrl: state.meta?.releasesUrl || "https://github.com/COMICFLY/redmagic-control/releases",
-        downloadUrl: state.meta?.releasesUrl || "https://github.com/COMICFLY/redmagic-control/releases",
-        assetName: "redmagic-control-v0.6.0-windows-x64.exe",
-        assetSize: 9912320,
-        publishedAt: "2026-11-20T16:00:00Z",
-        checkedAt: "23:30:00",
+        downloadUrl: "https://github.com/COMICFLY/redmagic-control/releases/download/v0.8.0/redmagic-control-v0.8.0-windows-x64.exe",
+        assetName: "redmagic-control-v0.8.0-windows-x64.exe",
+        assetSize: 10188288,
+        publishedAt: "2026-11-22T05:30:00Z",
+        checkedAt: "13:30:00",
       };
       state.ui.update.modalOpen = true;
       renderNavTabs();

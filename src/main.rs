@@ -58,7 +58,7 @@ impl Drop for SingleInstanceGuard {
 }
 
 #[cfg(windows)]
-fn acquire_single_instance() -> Option<SingleInstanceGuard> {
+fn acquire_single_instance(wait_ms: u64) -> Option<SingleInstanceGuard> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null;
@@ -79,17 +79,29 @@ fn acquire_single_instance() -> Option<SingleInstanceGuard> {
         .chain(std::iter::once(0))
         .collect();
 
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
     unsafe {
-        let h = CreateMutexW(null(), 0, mutex_name.as_ptr());
-        if h.is_null() {
-            return Some(SingleInstanceGuard {
-                mutex: std::ptr::null_mut(),
-                wake_event: std::ptr::null_mut(),
-            });
-        }
-        if GetLastError() == ERROR_ALREADY_EXISTS {
+        loop {
+            let h = CreateMutexW(null(), 0, mutex_name.as_ptr());
+            if h.is_null() {
+                return Some(SingleInstanceGuard {
+                    mutex: std::ptr::null_mut(),
+                    wake_event: std::ptr::null_mut(),
+                });
+            }
+            if GetLastError() != ERROR_ALREADY_EXISTS {
+                let wake_event = CreateEventW(null(), 0, 0, event_name.as_ptr());
+                return Some(SingleInstanceGuard {
+                    mutex: h,
+                    wake_event,
+                });
+            }
             CloseHandle(h);
-            // 优先通过命名事件唤醒常驻托盘进程（支持 WebView2 已销毁的纯 Rust 挂起态）
+            if wait_ms > 0 && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                continue;
+            }
+            // 优先通过命名事件唤醒常驻托盘进程（支持 WebView2 已销毁的挂起态）
             let ev = OpenEventW(EVENT_MODIFY_STATE, 0, event_name.as_ptr());
             if !ev.is_null() {
                 SetEvent(ev);
@@ -107,11 +119,6 @@ fn acquire_single_instance() -> Option<SingleInstanceGuard> {
             }
             return None;
         }
-        let wake_event = CreateEventW(null(), 0, 0, event_name.as_ptr());
-        Some(SingleInstanceGuard {
-            mutex: h,
-            wake_event,
-        })
     }
 }
 
@@ -119,7 +126,7 @@ fn acquire_single_instance() -> Option<SingleInstanceGuard> {
 struct SingleInstanceGuard;
 
 #[cfg(not(windows))]
-fn acquire_single_instance() -> Option<SingleInstanceGuard> {
+fn acquire_single_instance(_wait_ms: u64) -> Option<SingleInstanceGuard> {
     Some(SingleInstanceGuard)
 }
 
@@ -381,6 +388,12 @@ fn try_auto_resume_studio(
 fn main() {
     install_panic_logger();
     let args: Vec<String> = std::env::args().collect();
+
+    // 自动更新原位替换模式：等待旧进程退出 → 原子替换目标 exe → 拉起新版并清理临时文件
+    if updater::run_apply_update_mode(&args) {
+        return;
+    }
+
     let force_mock = std::env::var("MOCK_MODE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -424,14 +437,16 @@ fn main() {
         return;
     }
 
+    let just_updated = args.iter().any(|a| a == "--cleanup-update");
     let single_guard = if force_mock {
         None
     } else {
-        match acquire_single_instance() {
+        match acquire_single_instance(if just_updated { 4000 } else { 0 }) {
             Some(g) => Some(g),
             None => return,
         }
     };
+    updater::cleanup_update_artifacts_async(&args);
 
     #[cfg(windows)]
     let wake_event_raw: usize = single_guard
@@ -454,8 +469,11 @@ fn main() {
     let cleanup_mgr = manager.clone();
     let cleanup_studio = studio.clone();
     let force_quit = Arc::new(AtomicBool::new(false));
+    let state_force_quit = force_quit.clone();
     let setup_force_quit = force_quit.clone();
     let exit_force_quit = force_quit.clone();
+    let update_in_progress = Arc::new(AtomicBool::new(false));
+    let update_cancel = Arc::new(AtomicBool::new(false));
     let headless_shot = std::env::var("REDMAGIC_VIEW")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
@@ -475,6 +493,9 @@ fn main() {
             studio,
             settings,
             pending_auto_resume,
+            force_quit: state_force_quit,
+            update_in_progress,
+            update_cancel,
         })
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -654,6 +675,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::app_meta,
             commands::app_check_update,
+            commands::app_install_update,
+            commands::app_cancel_update,
             commands::app_open_url,
             commands::app_settings_get,
             commands::app_settings_set,

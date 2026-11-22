@@ -1257,11 +1257,16 @@ export function renderAbout(meta, update, settings) {
   let statusIcon = "info";
   let statusTitle = `当前运行版本 v${version}`;
   let statusDesc = "点击「立即检查更新」连接 GitHub Releases 检测最新版本";
-  if (checking) {
+  if (update?.installing) {
+    statusClass = "is-available";
+    statusIcon = "refresh";
+    statusTitle = `正在自动更新至 ${info?.tagName || "最新版本"}`;
+    statusDesc = update.progress?.message || "正在下载并校验更新文件…";
+  } else if (checking) {
     statusClass = "is-checking";
     statusIcon = "refresh";
     statusTitle = "正在检查更新…";
-    statusDesc = "通过 Windows 原生 WinHTTP HTTPS 访问 api.github.com";
+    statusDesc = "正在访问 GitHub Releases 获取最新版本信息";
   } else if (err) {
     statusClass = "is-error";
     statusIcon = "info";
@@ -1288,7 +1293,7 @@ export function renderAbout(meta, update, settings) {
          <li><strong>三模设备管理</strong>：支持 GK001S 键盘与 GS001S 鼠标的 USB 有线、2.4G 无线与蓝牙连接状态及电量监控。</li>
          <li><strong>性能与改键</strong>：回报率、DPI 档位、LOD 静默高度调节，以及全键位功能映射与出厂默认恢复。</li>
          <li><strong>灯效编程工作室</strong>：支持 4 组板载逐键涂色 (OP 0x0a/0x0b)、实时灯效推流 (OP 0x12/0x28)、音律/屏幕联动与本地 UDP/WS 接口。</li>
-         <li><strong>小屏与常驻托盘</strong>：320×172 彩屏图片裁切上传、开机自启、关闭自动挂起至系统托盘及在线检查更新。</li>
+         <li><strong>小屏与常驻托盘</strong>：320×172 彩屏图片裁切上传、开机自启、关闭自动挂起至系统托盘及一键自动更新。</li>
        </ul>`;
 
   return `
@@ -1357,27 +1362,37 @@ export function renderAbout(meta, update, settings) {
         <div class="card-head">
           <div class="card-head-text">
             <h2 class="card-title">版本检查与更新</h2>
-            <p class="card-desc">直连 GitHub Releases 检查最新发行版，发现新版本自动弹窗提醒</p>
+            <p class="card-desc">直连 GitHub Releases 检查最新发行版，支持一键自动下载替换并重启</p>
           </div>
           <span class="chip mono">${info?.tagName ? `最新 ${esc(info.tagName)}` : `v${esc(version)}`}</span>
         </div>
 
         <div class="update-status-banner ${statusClass}">
-          <div class="update-status-ico${checking ? " is-spin" : ""}">${icon(statusIcon, 20)}</div>
+          <div class="update-status-ico${checking || update?.installing ? " is-spin" : ""}">${icon(statusIcon, 20)}</div>
           <div class="update-status-copy">
             <strong>${esc(statusTitle)}</strong>
             <span>${esc(statusDesc)}</span>
           </div>
         </div>
 
+        ${renderUpdateProgressPanel(update)}
+
         <div class="about-update-actions">
-          <button type="button" class="btn btn-primary" id="about-check-update-btn" ${checking ? "disabled" : ""} style="flex:1">
-            ${icon("refresh", 14)}<span>${checking ? "正在连接 GitHub 检查更新…" : "立即检查更新"}</span>
-          </button>
-          ${info?.hasUpdate ? `
-            <button type="button" class="btn btn-danger" id="about-open-modal-btn">${icon("arrowUpCircle", 14)}查看更新弹窗</button>
+          ${info?.hasUpdate && info?.downloadUrl ? `
+            <button type="button" class="btn btn-primary" id="about-install-update-btn" ${update?.installing ? "disabled" : ""} style="flex:1">
+              ${icon("download", 14)}<span>${update?.installing ? "正在自动更新…" : `一键自动更新至 ${esc(info.tagName)}`}</span>
+            </button>
+            <button type="button" class="btn btn-secondary" id="about-open-modal-btn" ${update?.installing ? "disabled" : ""}>${icon("arrowUpCircle", 14)}更新详情</button>
+            <button type="button" class="btn btn-secondary" id="about-check-update-btn" ${checking || update?.installing ? "disabled" : ""}>${icon("refresh", 14)}</button>
           ` : `
-            <button type="button" class="btn btn-secondary" data-open-url="${esc(releasesUrl)}">${icon("externalLink", 14)}Releases</button>
+            <button type="button" class="btn btn-primary" id="about-check-update-btn" ${checking || update?.installing ? "disabled" : ""} style="flex:1">
+              ${icon("refresh", 14)}<span>${checking ? "正在连接 GitHub 检查更新…" : "立即检查更新"}</span>
+            </button>
+            ${info?.hasUpdate ? `
+              <button type="button" class="btn btn-danger" id="about-open-modal-btn">${icon("arrowUpCircle", 14)}查看更新弹窗</button>
+            ` : `
+              <button type="button" class="btn btn-secondary" data-open-url="${esc(releasesUrl)}">${icon("externalLink", 14)}Releases</button>
+            `}
           `}
         </div>
 
@@ -1432,10 +1447,67 @@ export function renderAbout(meta, update, settings) {
     </div>`;
 }
 
+function formatSpeedLabel(bps) {
+  const n = Number(bps);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB/s`;
+  return `${Math.max(1, Math.round(n / 1024))} KB/s`;
+}
+
+export function formatUpdateProgressMeta(prog) {
+  if (!prog) return "";
+  const pct = Math.max(0, Math.min(100, Number(prog.pct) || 0));
+  if (prog.stage === "downloading" && prog.downloaded > 0) {
+    const dlMb = (prog.downloaded / (1024 * 1024)).toFixed(1);
+    const totMb = prog.total ? ` / ${(prog.total / (1024 * 1024)).toFixed(1)} MB` : " MB";
+    const spd = formatSpeedLabel(prog.speedBps);
+    return `${dlMb}${totMb}${spd ? ` · ${spd}` : ""} (${pct}%)`;
+  }
+  return `${pct}%`;
+}
+
+function renderUpdateProgressPanel(update) {
+  if (update?.installing) {
+    const prog = update.progress || { stage: "connecting", pct: 0, message: "正在连接 GitHub 下载更新…" };
+    const pct = Math.max(0, Math.min(100, Number(prog.pct) || 0));
+    const canCancel = prog.stage === "connecting" || prog.stage === "downloading";
+    return `
+      <div class="update-progress-box">
+        <div class="row">
+          <span class="update-progress-msg js-update-prog-msg">${esc(prog.message || "正在下载更新…")}</span>
+          <span class="mono field-label js-update-prog-pct">${esc(formatUpdateProgressMeta(prog))}</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill js-update-prog-bar" style="width:${pct}%"></div>
+        </div>
+        ${canCancel ? `
+          <div class="update-progress-foot">
+            <span class="field-hint">下载校验通过后将自动替换程序并重启，设置与灯效方案自动保留</span>
+            <button type="button" class="btn btn-secondary btn-sm" data-cancel-update="1">取消下载</button>
+          </div>` : `
+          <div class="update-progress-foot">
+            <span class="field-hint">即将关闭当前窗口并自动启动新版本，请勿手动强退</span>
+          </div>`}
+      </div>`;
+  }
+  if (update?.installError) {
+    return `
+      <div class="update-error-box">
+        <strong>自动更新未完成</strong>
+        <span>${esc(update.installError)}</span>
+      </div>`;
+  }
+  return "";
+}
+
 export function renderUpdateModal(update) {
   const info = update?.info;
   if (!info || !info.hasUpdate) return "";
   const dlUrl = info.downloadUrl || info.releaseUrl;
+  const canSelfUpdate = Boolean(info.downloadUrl);
+  const installing = Boolean(update.installing);
+  const stage = update.progress?.stage || "";
+  const locked = installing && (stage === "verifying" || stage === "installing");
   const sizeBadge = info.assetSize ? `<span class="chip mono">${esc(formatBytesMb(info.assetSize))}</span>` : "";
   const dateBadge = info.publishedAt ? `<span class="chip mono">${esc(formatIsoDate(info.publishedAt))}</span>` : "";
 
@@ -1449,7 +1521,7 @@ export function renderUpdateModal(update) {
             <p class="card-desc">${esc(info.releaseName || "REDMAGIC Control 新版本已发布")}</p>
           </div>
         </div>
-        <button type="button" class="icon-btn" id="update-modal-close" aria-label="关闭弹窗">${icon("x", 14)}</button>
+        <button type="button" class="icon-btn" id="update-modal-close" aria-label="关闭弹窗" ${locked ? "disabled" : ""}>${icon("x", 14)}</button>
       </div>
 
       <div class="modal-ver-bar">
@@ -1468,12 +1540,20 @@ export function renderUpdateModal(update) {
         ${formatReleaseNotes(info.releaseNotes)}
       </div>
 
+      ${renderUpdateProgressPanel(update)}
+
       <div class="modal-foot">
-        <button type="button" class="btn btn-secondary btn-sm" id="update-modal-skip">跳过此版本</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="update-modal-skip" ${installing ? "disabled" : ""}>跳过此版本</button>
         <div class="card-actions">
-          <button type="button" class="btn btn-secondary btn-sm" id="update-modal-later">稍后提醒</button>
-          <button type="button" class="btn btn-secondary btn-sm" data-open-url="${esc(info.releaseUrl)}">${icon("externalLink", 13)}查看发布页</button>
-          <button type="button" class="btn btn-primary btn-sm" data-open-url="${esc(dlUrl)}">${icon("download", 13)}立即下载新版</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="update-modal-later" ${locked ? "disabled" : ""}>稍后提醒</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-open-url="${esc(dlUrl)}">${icon("externalLink", 13)}浏览器下载</button>
+          ${canSelfUpdate ? `
+            <button type="button" class="btn btn-primary btn-sm" id="update-modal-install" ${installing ? "disabled" : ""}>
+              ${icon("download", 13)}${installing ? "正在更新…" : update.installError ? "重试自动更新" : "立即自动更新并重启"}
+            </button>
+          ` : `
+            <button type="button" class="btn btn-primary btn-sm" data-open-url="${esc(dlUrl)}">${icon("download", 13)}前往下载新版</button>
+          `}
         </div>
       </div>
     </div>`;
