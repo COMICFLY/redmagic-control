@@ -5,6 +5,14 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-11-22
+
+### Fixed & Improved
+- **Redesigned mouse LED preview to match real `GS001S` hardware zones and cohesive lighting (`stage.js`, `lighting.js`, `panels.js`, `catalog.rs`)**:
+  - Removed the fake scroll-wheel RGB overlay (real `GS001S` only illuminates the left/right V-wing diffusers and the tail 4-blade RedMagic emblem, matching `mousedevice.xml`) and added a pixel-accurate `269×450` HiDPI alpha mask (`redmagic-mouse-led-mask.png`) with soft neon aura.
+  - Replaced disjoint per-zone solid colors with a unified lighting field: `随波逐流` renders a smooth continuous vertical gradient wave across V-wings and tail Logo (honoring official `由下至上 / 由上至下` direction), `流光模式` cycles all zones together in unified spectrum harmony, and `呼吸 / 常亮` keep all zones synchronized in the chosen color.
+  - Added official `由下至上 / 由上至下` direction toggle (`buf[4]`) for mouse `随波逐流` mode.
+
 ## [0.7.3] - 2026-11-21
 
 ### Fixed

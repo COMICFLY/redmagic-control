@@ -239,86 +239,77 @@ export function renderKeyboardStage(device, hwState, { interactiveKeys = false, 
   `;
 }
 
-/**
- * 单层 Canvas 渲染鼠标 3 处真实透光灯区（滚轮两侧透光缝 / 中段 V 型双翼 / 尾部红魔 Logo 徽标）。
- * 与键盘灯效预览保持一致，零 DOM 重排并自带柔和霓虹光晕。
- * zoneStyles: [{ color, op }, { color, op }, { color, op }]
- */
-export function drawMouseLedCanvas(ctx, zoneStyles) {
-  ctx.clearRect(0, 0, 179, 300);
-  if (!zoneStyles || zoneStyles.length < 3) return;
-  const hasRoundRect = typeof ctx.roundRect === "function";
-  const drawRRect = (x, y, w, h, r) => {
-    ctx.beginPath();
-    if (hasRoundRect) ctx.roundRect(x, y, w, h, r);
-    else ctx.rect(x, y, w, h);
-    ctx.fill();
+const MS_CANVAS_W = 269;
+const MS_CANVAS_H = 450;
+
+let msLedMaskReady = false;
+const msLedMaskWaiters = new Set();
+const msLedMaskImg = typeof Image !== "undefined" ? new Image() : null;
+if (msLedMaskImg) {
+  msLedMaskImg.onload = () => {
+    msLedMaskReady = true;
+    for (const cb of msLedMaskWaiters) {
+      try { cb(); } catch (_) {}
+    }
+    msLedMaskWaiters.clear();
   };
+  msLedMaskImg.src = "assets/redmagic-mouse-led-mask.png";
+}
 
-  // 1. 滚轮两侧透光缝（x=81..99, y=32..72）
-  const z0 = zoneStyles[0];
-  if (z0 && z0.op > 0.01) {
-    ctx.save();
-    ctx.fillStyle = z0.color;
-    ctx.shadowColor = z0.color;
-    ctx.shadowBlur = 7;
-    ctx.globalAlpha = z0.op * 0.34;
-    drawRRect(84.5, 36, 12, 32, 4);
-    ctx.globalAlpha = z0.op;
-    drawRRect(81, 33, 3.2, 38, 1.6);
-    drawRRect(96.8, 33, 3.2, 38, 1.6);
-    ctx.restore();
+export function onMouseMaskReady(cb) {
+  if (msLedMaskReady || !msLedMaskImg) return () => {};
+  msLedMaskWaiters.add(cb);
+  return () => msLedMaskWaiters.delete(cb);
+}
+
+/**
+ * 单层 HiDPI Canvas（269×450）按真实 GS001S 物理透光灯区（左右 V 型导光翼 + 尾部 4 刃红魔 Logo）渲染统一光场。
+ * 滚轮无 RGB 灯带不叠加伪灯效；所有灯区共享统一单色或连续渐变波，彻底消除各灯区互不相干的独立色块感。
+ * frame: { op: number, solid?: string, stops?: Array<[number, string]> }
+ */
+export function drawMouseLedCanvas(ctx, frame) {
+  ctx.clearRect(0, 0, MS_CANVAS_W, MS_CANVAS_H);
+  if (!frame || frame.op <= 0.01) return;
+
+  let fillStyle = frame.solid || "#e53945";
+  if (Array.isArray(frame.stops) && frame.stops.length >= 2) {
+    // 覆盖左右 V 型导光翼 (y≈195..233) 至尾部红魔 Logo (y≈358..401) 的连续纵向渐变波
+    const grad = ctx.createLinearGradient(0, 190, 0, 408);
+    for (const [offset, col] of frame.stops) {
+      grad.addColorStop(offset, col);
+    }
+    fillStyle = grad;
   }
 
-  // 2. 中段左右 V 型导光条（38,135.5 -> 77,154 与 143,135.5 -> 104,154）
-  const z1 = zoneStyles[1];
-  if (z1 && z1.op > 0.01) {
+  const alpha = Math.min(1, frame.op);
+  if (msLedMaskReady && msLedMaskImg) {
     ctx.save();
-    ctx.strokeStyle = z1.color;
-    ctx.lineCap = "round";
-    ctx.shadowColor = z1.color;
-    ctx.shadowBlur = 8;
-    ctx.beginPath();
-    ctx.moveTo(38, 135.5);
-    ctx.lineTo(77, 154);
-    ctx.moveTo(143, 135.5);
-    ctx.lineTo(104, 154);
-    ctx.globalAlpha = z1.op * 0.32;
-    ctx.lineWidth = 8.4;
-    ctx.stroke();
-    ctx.globalAlpha = z1.op;
-    ctx.lineWidth = 4.2;
-    ctx.stroke();
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(msLedMaskImg, 0, 0, MS_CANVAS_W, MS_CANVAS_H);
+    ctx.globalCompositeOperation = "source-in";
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = fillStyle;
+    ctx.fillRect(0, 0, MS_CANVAS_W, MS_CANVAS_H);
     ctx.restore();
+    return;
   }
 
-  // 3. 尾部红魔 Logo 徽标（bbox x=79..102, y=240..266）
-  const z2 = zoneStyles[2];
-  if (z2 && z2.op > 0.01) {
-    ctx.save();
-    ctx.fillStyle = z2.color;
-    ctx.strokeStyle = z2.color;
-    ctx.lineJoin = "round";
-    ctx.shadowColor = z2.color;
-    ctx.shadowBlur = 8;
-    ctx.beginPath();
-    ctx.moveTo(80, 245);
-    ctx.lineTo(86, 241);
-    ctx.lineTo(89, 250);
-    ctx.lineTo(92, 250);
-    ctx.lineTo(95, 241);
-    ctx.lineTo(101, 245);
-    ctx.lineTo(98, 257);
-    ctx.lineTo(90.5, 266);
-    ctx.lineTo(83, 257);
-    ctx.closePath();
-    ctx.globalAlpha = z2.op * 0.32;
-    ctx.lineWidth = 3.6;
-    ctx.stroke();
-    ctx.globalAlpha = z2.op;
-    ctx.fill();
-    ctx.restore();
-  }
+  // 遮罩尚未解码完毕的极短首帧兜底：同样仅渲染左右 V 型导光翼 + 尾部 Logo，保持统一光场
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = fillStyle;
+  ctx.fillStyle = fillStyle;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(60, 204);
+  ctx.lineTo(108, 229);
+  ctx.moveTo(212, 202);
+  ctx.lineTo(166, 226);
+  ctx.lineWidth = 7.5;
+  ctx.stroke();
+  ctx.fillRect(122, 362, 26, 36);
+  ctx.restore();
 }
 
 export function renderMouseStage(device, hwState, meta, { interactiveKeys = false, selectedSlot = null, showLightPreview = false } = {}) {
@@ -336,7 +327,7 @@ export function renderMouseStage(device, hwState, meta, { interactiveKeys = fals
   }).join("") : "";
 
   const ledZonesHtml = showLightPreview
-    ? `<canvas class="ms-led-canvas" width="179" height="300" aria-hidden="true"></canvas>`
+    ? `<canvas class="ms-led-canvas" width="269" height="450" aria-hidden="true"></canvas>`
     : "";
 
   return `

@@ -275,17 +275,18 @@ function renderDynamicLightControls({ prefix, isKb, isLogo, activeMode, cfg }) {
   }
 
   // 2. 灯效方向（严格对齐 Goper.exe 各模式方向文案：左/右、逆/顺时针、上/下、内/外）
-  if (isKb && !isLogo && activeMode.dir) {
+  if (!isLogo && activeMode.dir) {
     const dir = Number(cfg.direction) || 0;
     const labels = Array.isArray(activeMode.dirLabels) && activeMode.dirLabels.length === 2
       ? activeMode.dirLabels
       : ["由左至右", "由右至左"];
+    const dirAttr = isKb ? 'data-kb-cfg="light.direction"' : 'data-ms-cfg="light.direction"';
     blocks.push(`
       <div class="stack-sm">
         <span class="field-label">灯效方向</span>
         <div class="seg is-full">
-          <button type="button" class="seg-btn" data-kb-cfg="light.direction" data-val="0" aria-pressed="${dir === 0}">${esc(labels[0])}</button>
-          <button type="button" class="seg-btn" data-kb-cfg="light.direction" data-val="1" aria-pressed="${dir === 1}">${esc(labels[1])}</button>
+          <button type="button" class="seg-btn" ${dirAttr} data-val="0" aria-pressed="${dir === 0}">${esc(labels[0])}</button>
+          <button type="button" class="seg-btn" ${dirAttr} data-val="1" aria-pressed="${dir === 1}">${esc(labels[1])}</button>
         </div>
       </div>`);
   }
@@ -407,7 +408,7 @@ export function renderLighting(device, hwState, meta, ui) {
   return `
     <div class="workbench">
       <section class="card">
-        <div class="card-head"><div><h2 class="card-title">鼠标灯效预览</h2><p class="card-desc">滚轮、中段 V 型导光翼与尾部 Logo 实时同步</p></div></div>
+        <div class="card-head"><div><h2 class="card-title">鼠标灯效预览</h2><p class="card-desc">中段 V 型导光翼与尾部红魔 Logo 实时同步</p></div></div>
         ${renderMouseStage(device, hwState, meta, { showLightPreview: true })}
       </section>
 

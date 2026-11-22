@@ -1,7 +1,7 @@
 /* 轻量实时灯光预览引擎（单层 Canvas 零 DOM 重排，支持键盘 100 键背光 + 26 段顶部 Logo 灯条 + 鼠标三灯区）。
  * 自动响应 prefers-reduced-motion 与关闭/静态模式（静态时零轮询开销）。 */
 
-import { drawKeyboardLedCanvas, drawMouseLedCanvas } from "./stage.js";
+import { drawKeyboardLedCanvas, drawMouseLedCanvas, onMouseMaskReady } from "./stage.js";
 
 function hexToHsl(hex) {
   const clean = String(hex || "#e53945").replace("#", "");
@@ -128,32 +128,45 @@ function evalLogoSeg(mode, ratio, t, baseHsl, sevenColor, maxOp) {
   return { color: col(ratio * 260), op: maxOp };                           // 常亮（单色）
 }
 
-/* 计算鼠标 3 个实体灯区（对齐 Goper.exe 0x44e370：模式 0/1 固定多彩光谱，模式 2/3 固定指定单色） */
-function evalMouseZone(mode, idx, t, baseHsl, multi, maxOp) {
-  if (mode === 4 || maxOp <= 0.01) return { color: "transparent", op: 0 };
-  const effectiveMulti = mode === 0 || mode === 1;
-  const col = (h) => pickColor(effectiveMulti, h, baseHsl);
-  if (mode === 0) return { color: col(idx * 95 - t * 150), op: maxOp };             // 随波逐流（内置光谱）
-  if (mode === 1) return { color: hslCss(idx * 55 + t * 110, 92, 56), op: maxOp };  // 流光（内置光谱）
-  if (mode === 2) {                                                                 // 呼吸（单色）
-    const w = 0.18 + 0.82 * (0.5 + 0.5 * Math.sin(t * 2.5));
-    return { color: col(t * 45), op: maxOp * w };
+/* 计算鼠标统一光场帧（对齐 Goper.exe 0x44e370 + 真实 GS001S V 型双翼与尾部 Logo 物理灯效）：
+ * - mode 0 随波逐流：整鼠连续纵向光谱波（支持由下至上 / 由上至下方向），相邻色温和过渡，无割裂独立色块
+ * - mode 1 流光模式：全鼠所有灯区同步统一光谱流转
+ * - mode 2 呼吸 / mode 3 常亮：全鼠统一单色同步呼吸 / 常亮
+ * - mode 4 全灭：关闭 */
+function evalMouseFrame(mode, t, baseHsl, maxOp, dir = 0) {
+  if (mode === 4 || maxOp <= 0.01) return { op: 0 };
+  if (mode === 0) {
+    const dirSign = dir ? -1 : 1; // 0: 由下至上；1: 由上至下
+    const baseHue = -t * 115;
+    const span = 90;
+    const stops = [0, 0.25, 0.5, 0.75, 1].map((p) => [p, hslCss(baseHue + dirSign * (1 - p) * span, 92, 58)]);
+    return { op: maxOp, stops };
   }
-  return { color: col(idx * 80), op: maxOp };                                       // 常亮（单色）
+  if (mode === 1) {
+    return { op: maxOp, solid: hslCss(t * 78, 92, 58) };
+  }
+  if (mode === 2) {
+    const w = 0.16 + 0.84 * (0.5 + 0.5 * Math.sin(t * 2.4));
+    return { op: maxOp * w, solid: pickColor(false, 0, baseHsl) };
+  }
+  return { op: maxOp, solid: pickColor(false, 0, baseHsl) };
 }
 
 export class LightingAnimator {
   constructor() {
     this._raf = null;
     this._timer = null;
+    this._unsubMask = null;
     this._reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
   }
 
   stop() {
     if (this._timer) clearTimeout(this._timer);
     if (this._raf) cancelAnimationFrame(this._raf);
+    if (this._unsubMask) this._unsubMask();
     this._timer = null;
     this._raf = null;
+    this._unsubMask = null;
   }
 
   start(rootEl, device, hwState) {
@@ -175,7 +188,7 @@ export class LightingAnimator {
     // 键帽灯不透明度克制在 0.62 以内，清晰透出键帽字符
     const kbOp = device.kind === "keyboard" ? (cfg.light.brightness / 4) * 0.62 : 0;
     const logoOp = device.kind === "keyboard" ? (cfg.logo.brightness / 4) * 0.9 : 0;
-    const msOp = device.kind === "mouse" ? (cfg.light.brightness / 4) * 0.88 : 0;
+    const msOp = device.kind === "mouse" ? (cfg.light.brightness / 4) * 0.94 : 0;
 
     const kbSpeedMul = device.kind === "keyboard" ? 0.55 + cfg.light.speed * 0.45 : 1;
     const logoSpeedMul = device.kind === "keyboard" ? 0.5 + cfg.logo.speed * 0.35 : 1;
@@ -193,16 +206,15 @@ export class LightingAnimator {
         );
       } else if (msCtx) {
         const msT = tSec * msSpeedMul;
-        drawMouseLedCanvas(msCtx, [
-          evalMouseZone(cfg.light.mode, 0, msT, msHsl, cfg.light.multiColor, msOp),
-          evalMouseZone(cfg.light.mode, 1, msT, msHsl, cfg.light.multiColor, msOp),
-          evalMouseZone(cfg.light.mode, 2, msT, msHsl, cfg.light.multiColor, msOp),
-        ]);
+        drawMouseLedCanvas(msCtx, evalMouseFrame(cfg.light.mode, msT, msHsl, msOp, cfg.light.direction));
       }
     };
 
-    // 首帧立即渲染
+    // 首帧立即渲染；若鼠标遮罩 PNG 刚完成异步解码则立即重绘一次（保证静态模式也立即呈现精准 4 刃 Logo 遮罩）
     paint(0.6);
+    if (msCtx) {
+      this._unsubMask = onMouseMaskReady(() => paint(0.6));
+    }
 
     const kbKeysStatic = device.kind === "keyboard"
       && (!showKeys || cfg.light?.mode === 5 || cfg.light?.mode === 18 || cfg.light?.mode === 19 || kbOp <= 0.01);

@@ -236,11 +236,11 @@ pub fn get_metadata_json(version: &str) -> Value {
             { "id": 4, "name": "全灭",     "color": false, "multi": false, "brightness": false, "speed": false }
         ],
         "msLightModes": [
-            { "id": 0, "name": "随波逐流", "color": false, "multi": false, "brightness": true,  "speed": true  },
-            { "id": 1, "name": "流光模式", "color": false, "multi": false, "brightness": true,  "speed": true  },
-            { "id": 2, "name": "呼吸",     "color": true,  "multi": false, "brightness": true,  "speed": true  },
-            { "id": 3, "name": "常亮",     "color": true,  "multi": false, "brightness": true,  "speed": false },
-            { "id": 4, "name": "全灭",     "color": false, "multi": false, "brightness": false, "speed": false }
+            { "id": 0, "name": "随波逐流", "color": false, "multi": false, "brightness": true,  "speed": true,  "dir": true,  "dirLabels": ["由下至上", "由上至下"] },
+            { "id": 1, "name": "流光模式", "color": false, "multi": false, "brightness": true,  "speed": true,  "dir": false },
+            { "id": 2, "name": "呼吸",     "color": true,  "multi": false, "brightness": true,  "speed": true,  "dir": false },
+            { "id": 3, "name": "常亮",     "color": true,  "multi": false, "brightness": true,  "speed": false, "dir": false },
+            { "id": 4, "name": "全灭",     "color": false, "multi": false, "brightness": false, "speed": false, "dir": false }
         ],
         "kbPollingRates": [
             { "id": 0, "hz": 1000 }, { "id": 1, "hz": 500 }, { "id": 2, "hz": 250 }, { "id": 3, "hz": 125 }
