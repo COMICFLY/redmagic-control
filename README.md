@@ -1,6 +1,6 @@
 # REDMAGIC Control
 
-红魔外设桌面控制中心，支持 **REDMAGIC 氘锋机械键盘 `GK001S`** 与 **REDMAGIC 电竞鼠标 `GS001S`** 的有线 / 2.4G / 蓝牙三模管理、按键映射、灯效编程与小屏图片同步。
+红魔外设桌面控制中心，支持 **REDMAGIC 氘锋机械键盘 `GK001S`** 与 **REDMAGIC 电竞鼠标 `GS001S`** 的有线 / 2.4G / 蓝牙三模管理、按键映射、板载宏录制与同步、灯效编程及小屏图片同步。
 
 ## 界面预览
 
@@ -14,9 +14,13 @@
 | :---: | :---: |
 | ![GK001S 灯效编程工作室](docs/screenshots/kb-studio.png) | ![GK001S 板载逐键涂色](docs/screenshots/kb-paint.png) |
 
-| GS001S 鼠标 · 5 档 DPI 与传感器控制 | 关于软件与一键自动更新 |
+| GS001S 鼠标 · 5 档 DPI 与传感器控制 | 板载宏管理与 500Hz 录制工作台 |
 | :---: | :---: |
-| ![GS001S 鼠标概览与 DPI](docs/screenshots/ms-overview.png) | ![关于软件与一键自动更新](docs/screenshots/app-about.png) |
+| ![GS001S 鼠标概览与 DPI](docs/screenshots/ms-overview.png) | ![板载宏管理工作台](docs/screenshots/kb-macro.png) |
+
+| 关于软件与一键自动更新 |
+| :---: |
+| ![关于软件与一键自动更新](docs/screenshots/app-about.png) |
 
 ---
 
@@ -40,6 +44,7 @@
 | 板载逐键静态涂色（4 组 Flash） | 支持 (`OP 0x0a/0x0b`) | 支持 (`OP 0x0a/0x0b`) | 只读（板载方案依然生效） |
 | 可编程灯效 / 音律 / 屏幕联动 / 本地 API | 支持 (`OP 0x12/0x28`, 30 FPS) | 支持 (`OP 0x12/0x28`, 8 FPS) | 仅界面预览 |
 | 物理按键映射与出厂 ROM 恢复 | 支持 (`OP 0x07/0x08/0x09`) | 支持 (`OP 0x07/0x08/0x09`) | 只读 |
+| 板载宏录制、编辑与键位绑定 | 支持 (`OP 0x15` + `OP 0x09`) | 支持 (`OP 0x15` + `OP 0x09`) | 仅本地编辑与导入导出 |
 | GK001S 320×172 小屏壁纸写入 | 支持 (`OP 0x23/0x25`, 128 KB) | 仅支持本地裁切与存图库 | 仅支持本地裁切与存图库 |
 
 > **蓝牙 BLE 模式说明**：`GK001S` 蓝牙模式下仅广播标准 `HOGP (0x1812)` 键盘服务与 `BAS (0x180F)` 电池服务，未开放 `0xFF1C / 0x92` 私有配置通道。蓝牙连接时自动读取实时电量并标记为只读。
@@ -79,6 +84,7 @@
 | `0x08` / `0x09` | `READ_KEYMAP_USER` / `WRITE_KEYMAP` | 读写用户键表（`126 × 3 B` / `12 × 3 B`） |
 | `0x0A` / `0x0B` | `READ_CUSTOM_RGB` / `WRITE_CUSTOM_RGB` | 读写板载逐键静态 RGB（4 组槽位，偏移 `group * 0x200`，`378 B`，`light.mode = 18`） |
 | `0x12` | `STREAM_KEY_RGB` | 实时 RAM 逐键灯效推流（`378 B`，无需 `0x01/0x02` 事务，零 Flash 损耗，`light.mode = 29`） |
+| `0x15` | `WRITE_MACRO_TABLE` | 写入板载宏表（`AA 55` 16B 表头 + 偏移目录 + 4B 宏事件块，容量由 `READ_INFO[6] << 7` 给出，3,072 B） |
 | `0x1A` | `POLL_STATUS` | 查询电量与充电状态：`data[0] = 0..100 (%)`，`data[1] = 0 放电 / 1 充电 / 2 满电` |
 | `0x23` / `0x25` | `PREPARE_SCREEN_IMG` / `WRITE_SCREEN_IMG` | GK001S 静态小屏壁纸握手与流式写入（24-bit 偏移 `0x000000..0x01FFFF` → Flash `0xCE0000`） |
 | `0x28` | `STREAM_LOGO_RGB` | 实时 RAM 顶部 20 颗 Logo 灯条推流（`60 B`，无需事务，零 Flash 损耗，`logo.mode = 5`） |
@@ -112,7 +118,8 @@
 
 ### 2.5 键位映射、小屏壁纸与可编程灯效
 
-- **3B 键位编码**（`src/protocol/usage.rs`）：`0x20 + mod + hid_usage`（键盘按键）、`0x10 + btn + 0x00`（鼠标键）、`0x13 + op + 0x00`（DPI 切换）、`0x30 + hi + lo`（多媒体）、`0xA00000`（禁用）。
+- **3B 键位编码**（`src/protocol/usage.rs`）：`0x20 + mod + hid_usage`（键盘按键）、`0x10 + btn + 0x00`（鼠标键）、`0x13 + op + 0x00`（DPI 切换）、`0x30 + hi + lo`（多媒体）、`0x70 + idx + mode` / `0x71 + idx + repeat`（板载宏绑定）、`0xA00000`（禁用）。
+- **板载宏存储与录制**（`src/protocol/macro_proto.rs`, `src/macros.rs`）：支持本地跨键鼠宏库持久化（`%LOCALAPPDATA%\com.redmagic.control.rs\macros.json`）、500Hz 低延迟键盘/鼠标录制、动作时间轴微调（按键/修饰键/鼠标按键/XY 相对位移）、JSON 与官方 Goper `.mac` 导入导出，以及一键同步 `OP 0x15` 板载宏表并支持全部 5 种官方宏触发模式（单次 / 释放停止 / 按下开关 / 释放立即停止 / 播放指定次数）。
 - **320×172 小屏烧录**（`src/devices/keyboard.rs`）：画布输出转 Big-Endian RGB565（`110,080 B`）并补齐 `128 KB`，经 `OP 0x23` 握手与 `OP 0x25` 分 2,341 帧写入 `0xCE0000` 静态壁纸扇区（首包擦除等待 `1000 ms`，尾包静默 `2100 ms` 触发刷新），同时双向同步 `%LOCALAPPDATA%\Goper\keyboard\ScreenFileList.ini`。
 - **可编程灯效与本地 API**（`src/studio/`）：
   - **板载逐键涂色**：`OP 0x0a/0x0b` 读写 4 组 `378 B` 板载方案，断电与无线模式持久生效。

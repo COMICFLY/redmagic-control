@@ -3,10 +3,28 @@
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DecodedAssignment {
     pub hex: String,
     pub kind: String,
     pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macro_index: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macro_mode: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macro_repeat: Option<u8>,
+}
+
+fn plain_decoded(hex: String, kind: &str, label: String) -> DecodedAssignment {
+    DecodedAssignment {
+        hex,
+        kind: kind.to_string(),
+        label,
+        macro_index: None,
+        macro_mode: None,
+        macro_repeat: None,
+    }
 }
 
 pub fn hid_key_label(code: u8) -> Option<&'static str> {
@@ -92,11 +110,7 @@ pub fn decode_assignment(hex3: &str) -> DecodedAssignment {
         _ => None,
     };
     if let Some((kind, label)) = special {
-        return DecodedAssignment {
-            hex,
-            kind: kind.to_string(),
-            label: label.to_string(),
-        };
+        return plain_decoded(hex, kind, label.to_string());
     }
 
     let mouse = match hex.as_str() {
@@ -111,11 +125,7 @@ pub fn decode_assignment(hex3: &str) -> DecodedAssignment {
         _ => None,
     };
     if let Some((kind, label)) = mouse {
-        return DecodedAssignment {
-            hex,
-            kind: kind.to_string(),
-            label: label.to_string(),
-        };
+        return plain_decoded(hex, kind, label.to_string());
     }
 
     let media = match hex.as_str() {
@@ -129,32 +139,54 @@ pub fn decode_assignment(hex3: &str) -> DecodedAssignment {
         _ => None,
     };
     if let Some(label) = media {
-        return DecodedAssignment {
-            hex,
-            kind: "media".to_string(),
-            label: label.to_string(),
-        };
+        return plain_decoded(hex, "media", label.to_string());
     }
 
     let bytes = hex3_to_bytes(&hex);
     let (b0, b1, b2) = (bytes[0], bytes[1], bytes[2]);
+
+    // 板载宏绑定：0x70 [idx, mode(0..3)] / 0x71 [idx, repeat(1..255)] / 0x72 [shoot_idx, 0]
+    if b0 == 0x70 && b2 <= 3 {
+        let mode_text = match b2 {
+            0 => "单次",
+            1 => "释放停止",
+            2 => "按下开关",
+            3 => "按住循环",
+            _ => "单次",
+        };
+        return DecodedAssignment {
+            hex,
+            kind: "macro".to_string(),
+            label: format!("宏 #{} · {mode_text}", b1 as usize + 1),
+            macro_index: Some(b1),
+            macro_mode: Some(b2),
+            macro_repeat: None,
+        };
+    }
+    if b0 == 0x71 {
+        let rep = b2.max(1);
+        return DecodedAssignment {
+            hex,
+            kind: "macro".to_string(),
+            label: format!("宏 #{} · 循环 {rep} 次", b1 as usize + 1),
+            macro_index: Some(b1),
+            macro_mode: Some(4),
+            macro_repeat: Some(rep),
+        };
+    }
+    if b0 == 0x72 {
+        return plain_decoded(hex, "macro", format!("压枪宏 #{}", b1 as usize + 1));
+    }
+
     if b0 == 0x20 {
         if b1 != 0 && b2 == 0 {
             if let Some((_, label)) = MODIFIERS.iter().find(|(m, _)| *m == b1) {
-                return DecodedAssignment {
-                    hex,
-                    kind: "key".to_string(),
-                    label: (*label).to_string(),
-                };
+                return plain_decoded(hex, "key", (*label).to_string());
             }
         }
         if b1 == 0 {
             if let Some(label) = hid_key_label(b2) {
-                return DecodedAssignment {
-                    hex,
-                    kind: "key".to_string(),
-                    label: label.to_string(),
-                };
+                return plain_decoded(hex, "key", label.to_string());
             }
         }
         if b1 != 0 {
@@ -164,20 +196,12 @@ pub fn decode_assignment(hex3: &str) -> DecodedAssignment {
                     .filter(|(m, _)| (b1 & *m) != 0)
                     .map(|(_, n)| n.replace(" Right", ""))
                     .collect();
-                return DecodedAssignment {
-                    hex,
-                    kind: "combo".to_string(),
-                    label: format!("{}+{}", mods.join("+"), key_label),
-                };
+                return plain_decoded(hex, "combo", format!("{}+{}", mods.join("+"), key_label));
             }
         }
     }
 
-    DecodedAssignment {
-        label: format!("0x{}", hex.to_ascii_uppercase()),
-        hex,
-        kind: "raw".to_string(),
-    }
+    plain_decoded(hex.clone(), "raw", format!("0x{}", hex.to_ascii_uppercase()))
 }
 
 const GK001S_ROM_ENTRIES: &[(usize, &str)] = &[

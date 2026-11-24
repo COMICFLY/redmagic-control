@@ -2,6 +2,7 @@
 
 mod commands;
 mod devices;
+mod macros;
 mod protocol;
 mod settings;
 mod studio;
@@ -15,6 +16,7 @@ use std::sync::Arc;
 
 use commands::AppState;
 use devices::manager::DeviceManager;
+use macros::{MacroRecorder, MacroStore};
 use settings::SettingsStore;
 use studio::StudioEngine;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -457,6 +459,9 @@ fn main() {
     let manager = DeviceManager::new(force_mock);
     let studio = StudioEngine::new();
     let settings = SettingsStore::load(force_mock);
+    let macros = MacroStore::load(force_mock);
+    let macro_recorder = MacroRecorder::new();
+    let cleanup_recorder = macro_recorder.clone();
     settings.refresh_autostart_path_if_enabled();
     let launched_autostart = args.iter().any(|a| a == "--autostart");
     let monitor_mgr = manager.clone();
@@ -492,6 +497,8 @@ fn main() {
             manager,
             studio,
             settings,
+            macros,
+            macro_recorder,
             pending_auto_resume,
             force_quit: state_force_quit,
             update_in_progress,
@@ -712,6 +719,14 @@ fn main() {
             commands::studio_server_stop,
             commands::studio_export_preset,
             commands::studio_import_preset,
+            commands::macro_list_get,
+            commands::macro_list_save,
+            commands::macro_sync_device,
+            commands::macro_bind_key,
+            commands::macro_record_start,
+            commands::macro_record_stop,
+            commands::macro_export_file,
+            commands::macro_import_file,
         ])
         .build(tauri::generate_context!())
         .expect("构建 Tauri 应用失败")
@@ -729,10 +744,12 @@ fn main() {
                         api.prevent_exit();
                         return;
                     }
+                    let _ = cleanup_recorder.stop();
                     cleanup_studio.shutdown(&cleanup_mgr);
                     cleanup_mgr.close_all_sessions();
                 }
                 tauri::RunEvent::Exit => {
+                    let _ = cleanup_recorder.stop();
                     cleanup_studio.shutdown(&cleanup_mgr);
                     cleanup_mgr.close_all_sessions();
                 }

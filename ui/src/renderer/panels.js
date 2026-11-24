@@ -34,6 +34,71 @@ export const MEDIA_PRESETS = [
   ["3000cd", "播放 / 暂停"], ["3000b5", "下一曲"], ["3000b6", "上一曲"], ["3000b7", "停止"],
 ];
 
+export const MACRO_TRIGGER_MODES = [
+  { id: 0, name: "单次执行", desc: "按下触发一次完整宏" },
+  { id: 1, name: "释放停止", desc: "按住循环，松开后播完本次" },
+  { id: 2, name: "按下开关", desc: "按一下循环，再按一下停止" },
+  { id: 3, name: "释放立即停止", desc: "按住循环，松开立刻中断" },
+  { id: 4, name: "播放指定次数", desc: "重复执行 1 ~ 255 次后停止" },
+];
+
+export const MACRO_INSERT_PRESETS = [
+  { group: "鼠标按键", items: [
+    { kind: "mouse", code: 0x01, label: "鼠标左键" },
+    { kind: "mouse", code: 0x02, label: "鼠标右键" },
+    { kind: "mouse", code: 0x04, label: "鼠标中键" },
+    { kind: "mouse", code: 0x08, label: "鼠标后退" },
+    { kind: "mouse", code: 0x10, label: "鼠标前进" },
+  ]},
+  { group: "修饰键", items: [
+    { kind: "modifier", code: 0x01, label: "左 Ctrl" },
+    { kind: "modifier", code: 0x02, label: "左 Shift" },
+    { kind: "modifier", code: 0x04, label: "左 Alt" },
+    { kind: "modifier", code: 0x08, label: "左 Win" },
+    { kind: "modifier", code: 0x10, label: "右 Ctrl" },
+    { kind: "modifier", code: 0x20, label: "右 Shift" },
+    { kind: "modifier", code: 0x40, label: "右 Alt" },
+  ]},
+  { group: "常用按键", items: [
+    { kind: "key", code: 0x28, label: "Enter" },
+    { kind: "key", code: 0x2c, label: "Space" },
+    { kind: "key", code: 0x29, label: "Esc" },
+    { kind: "key", code: 0x2b, label: "Tab" },
+    { kind: "key", code: 0x2a, label: "Backspace" },
+    { kind: "key", code: 0x4c, label: "Delete" },
+    ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map((ch, i) => ({ kind: "key", code: 4 + i, label: ch })),
+    ..."123456789".split("").map((ch, i) => ({ kind: "key", code: 0x1e + i, label: ch })),
+    { kind: "key", code: 0x27, label: "0" },
+    ...Array.from({ length: 12 }, (_, i) => ({ kind: "key", code: 0x3a + i, label: `F${i + 1}` })),
+  ]},
+];
+
+export function computeMacroTableBytes(macros = []) {
+  const n = macros.length;
+  let body = 0;
+  for (const m of macros) body += 4 + (m.events?.length || 0) * 4;
+  return 16 + n * 2 + body;
+}
+
+export function computeMacroDurationMs(macro) {
+  if (!macro || !Array.isArray(macro.events)) return 0;
+  let sum = 0;
+  for (const ev of macro.events) sum += Math.max(0, Number(ev.delayMs) || 0);
+  return sum;
+}
+
+export function formatMacroAssignmentLabel(decoded, macros = []) {
+  if (!decoded) return "--";
+  if (decoded.kind !== "macro" || decoded.macroIndex == null) return decoded.label || "--";
+  const m = macros[decoded.macroIndex];
+  const baseName = m ? m.name : `宏 #${decoded.macroIndex + 1}`;
+  if (decoded.macroMode === 4) {
+    return `宏 · ${baseName} (×${decoded.macroRepeat || 1})`;
+  }
+  const modeInfo = MACRO_TRIGGER_MODES.find((x) => x.id === decoded.macroMode);
+  return modeInfo ? `宏 · ${baseName} (${modeInfo.name})` : `宏 · ${baseName}`;
+}
+
 function esc(str) {
   return String(str ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -433,6 +498,12 @@ export function renderKeymap(device, hwState, meta, ui) {
   const row = km.find((k) => k.slot === selectedSlot) || km[0];
   const category = ui.keyCategory || (device.kind === "mouse" ? "mouse" : "key");
   const pendingHex = ui.pendingHex || row?.hex || "200029";
+  const macros = ui.macro?.list || [];
+  const macroIdx = Math.min(Math.max(0, Number(ui.keyMacroIndex ?? 0)), Math.max(0, macros.length - 1));
+  const macroMode = Math.min(4, Math.max(0, Number(ui.keyMacroMode ?? 0)));
+  const macroRepeat = Math.min(255, Math.max(1, Number(ui.keyMacroRepeat ?? 1)));
+  const currentLabel = formatMacroAssignmentLabel(row?.current, macros);
+  const readOnly = !hwState.mock && hwState.supportsConfig === false;
 
   let pickerHtml = "";
   if (category === "key") {
@@ -469,9 +540,51 @@ export function renderKeymap(device, hwState, meta, ui) {
       `<option value="${hex}"${pendingHex === hex ? " selected" : ""}>${esc(label)}</option>`
     ).join("");
     pickerHtml = `<div class="stack-sm"><label class="field-label" for="key-preset-select">多媒体控制</label><select class="select" id="key-preset-select">${opts}</select></div>`;
+  } else if (category === "macro") {
+    if (macros.length === 0) {
+      pickerHtml = `
+        <div class="km-macro-empty">
+          <span>宏库为空，请先录制或新建一条宏。</span>
+          <button type="button" class="btn btn-secondary btn-sm" id="goto-macro-create-btn">${icon("repeat", 13)}前往宏管理</button>
+        </div>`;
+    } else {
+      const mOpts = macros.map((m, i) =>
+        `<option value="${i}"${macroIdx === i ? " selected" : ""}>#${i + 1} · ${esc(m.name)} (${m.events?.length || 0} 动作)</option>`
+      ).join("");
+      const modeOpts = MACRO_TRIGGER_MODES.map((tm) =>
+        `<option value="${tm.id}"${macroMode === tm.id ? " selected" : ""}>${esc(tm.name)} · ${esc(tm.desc)}</option>`
+      ).join("");
+      const repeatHtml = macroMode === 4
+        ? `<div class="km-macro-repeat"><label class="field-label" for="key-macro-repeat">次数</label><input class="input mono" id="key-macro-repeat" type="number" min="1" max="255" value="${macroRepeat}" /></div>`
+        : "";
+      if (device.kind === "keyboard") {
+        pickerHtml = `
+          <div class="km-macro-grid${macroMode === 4 ? " has-repeat" : ""}">
+            <select class="select" id="key-macro-index" aria-label="选择宏">${mOpts}</select>
+            <select class="select" id="key-macro-mode" aria-label="宏触发模式">${modeOpts}</select>
+            ${repeatHtml}
+          </div>`;
+      } else {
+        pickerHtml = `
+          <div class="stack-sm">
+            <label class="field-label" for="key-macro-index">选择板载宏（写入时自动同步宏表）</label>
+            <select class="select" id="key-macro-index">${mOpts}</select>
+            <div class="km-macro-row-ms">
+              <div class="stack-sm" style="flex:1">
+                <label class="field-label" for="key-macro-mode">触发方式</label>
+                <select class="select" id="key-macro-mode">${modeOpts}</select>
+              </div>
+              ${repeatHtml}
+            </div>
+          </div>`;
+      }
+    }
   } else {
     pickerHtml = `<p class="card-desc">写入 <span class="mono">0xA00000</span>，按下该物理按键将不触发任何输出。</p>`;
   }
+
+  const saveDisabled = readOnly || (category === "macro" && macros.length === 0);
+  const saveBtnLabel = category === "macro" ? "同步宏并写入" : "写入设备";
 
   if (device.kind === "keyboard") {
     const stageHtml = renderKeyboardStage(device, hwState, { interactiveKeys: true, selectedSlot, large: true, screenDataUrl: ui.screenDataUrl });
@@ -480,23 +593,23 @@ export function renderKeymap(device, hwState, meta, ui) {
         <section class="card">
           <div class="card-head">
             <div><h2 class="card-title">键盘物理按键映射</h2><p class="card-desc">全宽放大视图 · OP 0x08 读当前态 · OP 0x07 对照出厂 ROM · OP 0x09 写入</p></div>
-            <button type="button" class="btn btn-danger" id="reset-all-keys-btn">${icon("rotateCcw", 14)}重置全部键位</button>
+            <button type="button" class="btn btn-danger" id="reset-all-keys-btn" ${readOnly ? "disabled" : ""}>${icon("rotateCcw", 14)}重置全部键位</button>
           </div>
           ${stageHtml}
         </section>
 
-        <section class="card keymap-inspector-bar">
+        <section class="card keymap-inspector-bar${readOnly ? " is-readonly" : ""}">
           <div class="km-col-info">
             <div class="row">
               <div>
                 <h2 class="card-title">槽位 <span class="mono">#${row?.slot ?? 0}</span></h2>
                 <p class="card-desc">${row?.modified ? "已偏离出厂默认配置" : "与出厂默认一致"}</p>
               </div>
-              <span class="keycap">${esc(row?.current?.label ?? "--")}</span>
+              <span class="keycap">${esc(currentLabel)}</span>
             </div>
             <div class="spec-list">
               <div class="spec-item"><dt>出厂默认 (0x07)</dt><dd class="mono">${esc(row?.fallback?.label ?? "--")}</dd></div>
-              <div class="spec-item"><dt>当前生效 (0x08)</dt><dd class="mono">${esc(row?.current?.label ?? "--")}</dd></div>
+              <div class="spec-item"><dt>当前生效 (0x08)</dt><dd class="mono">${esc(currentLabel)}</dd></div>
             </div>
           </div>
 
@@ -507,6 +620,7 @@ export function renderKeymap(device, hwState, meta, ui) {
                 <button type="button" class="seg-btn" data-key-cat="key" aria-pressed="${category === "key"}">键盘</button>
                 <button type="button" class="seg-btn" data-key-cat="mouse" aria-pressed="${category === "mouse"}">鼠标</button>
                 <button type="button" class="seg-btn" data-key-cat="media" aria-pressed="${category === "media"}">媒体</button>
+                <button type="button" class="seg-btn" data-key-cat="macro" aria-pressed="${category === "macro"}">宏</button>
                 <button type="button" class="seg-btn" data-key-cat="disable" aria-pressed="${category === "disable"}">禁用</button>
               </div>
             </div>
@@ -514,8 +628,8 @@ export function renderKeymap(device, hwState, meta, ui) {
           </div>
 
           <div class="km-col-actions">
-            <button type="button" class="btn btn-primary" id="save-one-key-btn">${icon("check", 14)}写入设备</button>
-            <button type="button" class="btn btn-secondary" id="reset-one-key-btn">${icon("rotateCcw", 14)}恢复此键默认</button>
+            <button type="button" class="btn btn-primary" id="save-one-key-btn" ${saveDisabled ? "disabled" : ""}>${icon("check", 14)}${saveBtnLabel}</button>
+            <button type="button" class="btn btn-secondary" id="reset-one-key-btn" ${readOnly ? "disabled" : ""}>${icon("rotateCcw", 14)}恢复此键默认</button>
           </div>
         </section>
       </div>`;
@@ -528,23 +642,23 @@ export function renderKeymap(device, hwState, meta, ui) {
       <section class="card">
         <div class="card-head">
           <div><h2 class="card-title">物理按键映射</h2><p class="card-desc">OP 0x08 读取当前生效值 · OP 0x07 对照出厂 ROM · OP 0x09 写入</p></div>
-          <button type="button" class="btn btn-danger" id="reset-all-keys-btn">${icon("rotateCcw", 14)}重置全部键位</button>
+          <button type="button" class="btn btn-danger" id="reset-all-keys-btn" ${readOnly ? "disabled" : ""}>${icon("rotateCcw", 14)}重置全部键位</button>
         </div>
         ${stageHtml}
       </section>
 
-      <aside class="card">
+      <aside class="card${readOnly ? " is-readonly" : ""}">
         <div class="card-head">
           <div>
             <h2 class="card-title">槽位 <span class="mono">#${row?.slot ?? 0}</span></h2>
             <p class="card-desc">${row?.modified ? "已偏离出厂默认配置" : "与出厂默认一致"}</p>
           </div>
-          <span class="keycap">${esc(row?.current?.label ?? "--")}</span>
+          <span class="keycap">${esc(currentLabel)}</span>
         </div>
 
         <div class="spec-list">
           <div class="spec-item"><dt>出厂默认 (0x07)</dt><dd class="mono">${esc(row?.fallback?.label ?? "--")}</dd></div>
-          <div class="spec-item"><dt>当前生效 (0x08)</dt><dd class="mono">${esc(row?.current?.label ?? "--")}</dd></div>
+          <div class="spec-item"><dt>当前生效 (0x08)</dt><dd class="mono">${esc(currentLabel)}</dd></div>
         </div>
 
         <div class="stack-sm">
@@ -553,6 +667,7 @@ export function renderKeymap(device, hwState, meta, ui) {
             <button type="button" class="seg-btn" data-key-cat="key" aria-pressed="${category === "key"}">键盘</button>
             <button type="button" class="seg-btn" data-key-cat="mouse" aria-pressed="${category === "mouse"}">鼠标</button>
             <button type="button" class="seg-btn" data-key-cat="media" aria-pressed="${category === "media"}">媒体</button>
+            <button type="button" class="seg-btn" data-key-cat="macro" aria-pressed="${category === "macro"}">宏</button>
             <button type="button" class="seg-btn" data-key-cat="disable" aria-pressed="${category === "disable"}">禁用</button>
           </div>
         </div>
@@ -560,8 +675,8 @@ export function renderKeymap(device, hwState, meta, ui) {
         ${pickerHtml}
 
         <div class="row">
-          <button type="button" class="btn btn-secondary" id="reset-one-key-btn">${icon("rotateCcw", 14)}恢复此键</button>
-          <button type="button" class="btn btn-primary" id="save-one-key-btn" style="flex:1">${icon("check", 14)}写入设备</button>
+          <button type="button" class="btn btn-secondary" id="reset-one-key-btn" ${readOnly ? "disabled" : ""}>${icon("rotateCcw", 14)}恢复此键</button>
+          <button type="button" class="btn btn-primary" id="save-one-key-btn" style="flex:1" ${saveDisabled ? "disabled" : ""}>${icon("check", 14)}${saveBtnLabel}</button>
         </div>
       </aside>
     </div>`;
@@ -1556,5 +1671,235 @@ export function renderUpdateModal(update) {
           `}
         </div>
       </div>
+    </div>`;
+}
+
+/* ---- 视图：板载宏管理工作台（OP 0x15 宏表 + 500Hz 录制 + 动作时间轴编辑） ---- */
+function macroActionBadge(ev) {
+  if (ev.kind === "moveX") {
+    return `<button type="button" class="macro-act-pill is-move" data-macro-ev-toggle title="点击切换左移 / 右移">${ev.down ? "← 左移" : "→ 右移"}</button>`;
+  }
+  if (ev.kind === "moveY") {
+    return `<button type="button" class="macro-act-pill is-move" data-macro-ev-toggle title="点击切换上移 / 下移">${ev.down ? "↑ 上移" : "↓ 下移"}</button>`;
+  }
+  return `<button type="button" class="macro-act-pill ${ev.down ? "is-down" : "is-up"}" data-macro-ev-toggle title="点击切换按下 / 弹起">${ev.down ? "↓ 按下" : "↑ 弹起"}</button>`;
+}
+
+function macroKindTag(kind) {
+  if (kind === "mouse") return `<span class="macro-kind-dot is-mouse">鼠标</span>`;
+  if (kind === "modifier") return `<span class="macro-kind-dot is-mod">修饰</span>`;
+  if (kind === "moveX" || kind === "moveY") return `<span class="macro-kind-dot is-move">位移</span>`;
+  return `<span class="macro-kind-dot is-key">按键</span>`;
+}
+
+export function renderMacroEventRowsHtml(events = []) {
+  if (!events.length) {
+    return `
+      <div class="macro-empty-timeline">
+        <div class="macro-empty-ico">${icon("repeat", 22)}</div>
+        <strong>暂无宏动作</strong>
+        <span>点击上方「开始录制」记录按键与鼠标操作，或使用快捷插入添加单个按键与鼠标位移。</span>
+      </div>`;
+  }
+  const lastIdx = events.length - 1;
+  return events.map((ev, i) => `
+    <div class="macro-ev-row" data-macro-ev-idx="${i}">
+      <span class="macro-ev-num mono">${i + 1}</span>
+      <div class="macro-ev-main">
+        ${macroKindTag(ev.kind)}
+        <span class="macro-ev-key">${esc(ev.label || `0x${Number(ev.code || 0).toString(16).toUpperCase()}`)}</span>
+        ${macroActionBadge(ev)}
+      </div>
+      <div class="macro-ev-delay">
+        ${icon("clock", 12)}
+        <input type="number" class="input mono macro-delay-input" min="0" max="65535" step="5" value="${Math.max(0, Number(ev.delayMs) || 0)}" data-macro-ev-delay="${i}" aria-label="动作后延时（毫秒）" />
+        <span class="macro-delay-unit mono">ms</span>
+      </div>
+      <div class="macro-ev-ops">
+        <button type="button" class="tool-icon-btn" data-macro-ev-top="${i}" title="置顶" ${i === 0 ? "disabled" : ""}>${icon("chevronsUp", 12)}</button>
+        <button type="button" class="tool-icon-btn" data-macro-ev-up="${i}" title="上移" ${i === 0 ? "disabled" : ""}>${icon("arrowUp", 12)}</button>
+        <button type="button" class="tool-icon-btn" data-macro-ev-down="${i}" title="下移" ${i === lastIdx ? "disabled" : ""}>${icon("arrowDown", 12)}</button>
+        <button type="button" class="tool-icon-btn is-del" data-macro-ev-del="${i}" title="删除动作">${icon("trash", 12)}</button>
+      </div>
+    </div>`).join("");
+}
+
+export function renderMacros(device, hwState, ui) {
+  const mState = ui.macro || {};
+  const list = Array.isArray(mState.list) ? mState.list : [];
+  const selectedId = mState.selectedId || list[0]?.id || null;
+  const activeIdx = list.findIndex((m) => m.id === selectedId);
+  const active = activeIdx >= 0 ? list[activeIdx] : null;
+  const recording = Boolean(mState.recording);
+  const recordMouse = Boolean(mState.recordMouse);
+  const readOnly = !hwState || (!hwState.mock && hwState.supportsConfig === false);
+
+  const capacityBytes = Number(hwState?.macroCapacityBytes) || 3072;
+  const usedBytes = computeMacroTableBytes(list);
+  const pct = Math.min(100, Math.round((usedBytes / capacityBytes) * 100));
+  const overLimit = usedBytes > capacityBytes;
+  const remainEvents = overLimit ? 0 : Math.floor((capacityBytes - usedBytes) / 4);
+
+  const boundSlots = (hwState?.keymap || [])
+    .filter((k) => k.current?.kind === "macro" && k.current?.macroIndex != null)
+    .reduce((acc, k) => {
+      const idx = k.current.macroIndex;
+      acc.set(idx, (acc.get(idx) || 0) + 1);
+      return acc;
+    }, new Map());
+
+  const listHtml = list.length > 0
+    ? list.map((m, i) => {
+        const isSel = active && m.id === active.id;
+        const evCount = m.events?.length || 0;
+        const durMs = computeMacroDurationMs(m);
+        const boundCnt = boundSlots.get(i) || 0;
+        return `
+          <div class="macro-list-item${isSel ? " is-active" : ""}" role="button" tabindex="0" data-macro-select="${esc(m.id)}">
+            <span class="macro-slot-idx mono">#${i + 1}</span>
+            <div class="macro-list-copy">
+              <strong class="macro-list-name">${esc(m.name)}</strong>
+              <span class="macro-list-meta mono">${evCount} 动作 · ${durMs} ms${boundCnt > 0 ? ` · 已绑 ${boundCnt} 键` : ""}</span>
+            </div>
+            <div class="macro-list-ops">
+              <button type="button" class="tool-icon-btn" data-macro-dup="${esc(m.id)}" title="复制宏" ${recording ? "disabled" : ""}>${icon("copy", 12)}</button>
+              <button type="button" class="tool-icon-btn is-del" data-macro-del="${esc(m.id)}" title="删除宏" ${recording ? "disabled" : ""}>${icon("trash", 12)}</button>
+            </div>
+          </div>`;
+      }).join("")
+    : `
+      <div class="macro-list-empty">
+        <strong>还没有宏</strong>
+        <span>点击右上角「新建」或「导入」创建第一条板载宏，支持兼容导入官方 Goper <span class="mono">.mac</span> 文件。</span>
+      </div>`;
+
+  const insertOptionsHtml = MACRO_INSERT_PRESETS.map((grp) => `
+    <optgroup label="${esc(grp.group)}">
+      ${grp.items.map((it) => `<option value="${it.kind}:${it.code}:${esc(it.label)}">${esc(it.label)}</option>`).join("")}
+    </optgroup>`).join("");
+
+  const delayMode = active?.delayMode || "recorded";
+  const fixedDelayMs = Math.max(1, Number(active?.fixedDelayMs) || 20);
+  const activeEvents = active?.events || [];
+  const activeDuration = computeMacroDurationMs(active);
+  const activeBytes = active ? 4 + activeEvents.length * 4 : 0;
+
+  const editorHtml = active
+    ? `
+      <section class="card macro-editor-card">
+        <div class="macro-editor-head">
+          <div class="macro-name-wrap">
+            <span class="macro-slot-badge mono">#${activeIdx + 1}</span>
+            <input type="text" class="input macro-name-input" id="macro-name-input" value="${esc(active.name)}" maxlength="40" placeholder="输入宏名称…" ${recording ? "disabled" : ""} />
+          </div>
+          <div class="macro-stats-pills mono">
+            <span class="chip" id="macro-stat-count">${activeEvents.length} 动作</span>
+            <span class="chip" id="macro-stat-dur">${activeDuration} ms</span>
+            <span class="chip">${activeBytes} B</span>
+          </div>
+        </div>
+
+        <div class="macro-recorder-bar${recording ? " is-recording" : ""}">
+          <button type="button" class="btn ${recording ? "btn-danger" : "btn-primary"} macro-rec-btn" id="macro-record-btn">
+            ${recording ? `${icon("stop", 14)}<span>停止录制</span>` : `${icon("circleDot", 14)}<span>开始录制</span>`}
+          </button>
+
+          <div class="macro-rec-options">
+            <div class="seg">
+              <button type="button" class="seg-btn" data-macro-delay-mode="recorded" aria-pressed="${delayMode === "recorded"}" ${recording ? "disabled" : ""}>真实延时</button>
+              <button type="button" class="seg-btn" data-macro-delay-mode="fixed" aria-pressed="${delayMode === "fixed"}" ${recording ? "disabled" : ""}>固定延时</button>
+              <button type="button" class="seg-btn" data-macro-delay-mode="none" aria-pressed="${delayMode === "none"}" ${recording ? "disabled" : ""}>无延时</button>
+            </div>
+            ${delayMode === "fixed" ? `
+              <div class="macro-fixed-ms">
+                <input type="number" class="input mono" id="macro-fixed-delay" min="1" max="10000" step="5" value="${fixedDelayMs}" ${recording ? "disabled" : ""} aria-label="固定延时毫秒" />
+                <span class="mono">ms</span>
+              </div>` : ""}
+            <label class="macro-check-pill${recordMouse ? " is-on" : ""}">
+              <input type="checkbox" id="macro-record-mouse" ${recordMouse ? "checked" : ""} ${recording ? "disabled" : ""} />
+              <span>包含鼠标按键</span>
+            </label>
+          </div>
+        </div>
+
+        ${recording ? `
+          <div class="macro-rec-live-banner" role="status">
+            <span class="stream-pulse-dot" aria-hidden="true"></span>
+            <span>正在录制键盘${recordMouse ? "与鼠标按键" : ""}输入… 可直接按下任意按键（支持 Ctrl / Shift / Alt / Win / Tab / F1~F12），完成后点击「停止录制」。</span>
+          </div>` : `
+          <div class="macro-insert-bar">
+            <div class="macro-insert-group">
+              <select class="select macro-insert-select" id="macro-insert-preset" aria-label="选择要插入的按键或鼠标动作">
+                ${insertOptionsHtml}
+              </select>
+              <button type="button" class="btn btn-secondary btn-sm" id="macro-insert-pair-btn" title="插入该按键的按下与弹起成对动作">${icon("plus", 13)}插入</button>
+            </div>
+            <div class="macro-insert-group">
+              <span class="field-label mono" style="margin:0">XY</span>
+              <input type="number" class="input mono macro-move-input" id="macro-move-x" min="-255" max="255" value="0" placeholder="X" title="横向像素位移 (-255 左 ~ +255 右)" />
+              <input type="number" class="input mono macro-move-input" id="macro-move-y" min="-255" max="255" value="10" placeholder="Y" title="纵向像素位移 (-255 上 ~ +255 下)" />
+              <button type="button" class="btn btn-secondary btn-sm" id="macro-insert-move-btn" title="插入鼠标相对像素位移">${icon("move", 13)}位移</button>
+            </div>
+            <div class="macro-insert-group is-right">
+              <button type="button" class="btn btn-secondary btn-sm" id="macro-apply-delay-all" ${activeEvents.length === 0 ? "disabled" : ""} title="将全部动作后延时统一设为 ${fixedDelayMs} ms">${icon("clock", 13)}统一 ${fixedDelayMs}ms</button>
+              <button type="button" class="btn btn-danger btn-sm" id="macro-clear-events-btn" ${activeEvents.length === 0 ? "disabled" : ""}>${icon("trash", 13)}清空</button>
+            </div>
+          </div>`}
+
+        <div class="macro-timeline" id="macro-timeline">
+          ${renderMacroEventRowsHtml(activeEvents)}
+        </div>
+      </section>`
+    : `
+      <section class="card macro-editor-card is-empty">
+        <div class="macro-empty-timeline">
+          <div class="macro-empty-ico">${icon("repeat", 24)}</div>
+          <strong>请选择或新建一条宏</strong>
+          <span>新建后可录制键盘/鼠标动作、逐条微调毫秒延时，并写入 ${esc(device?.model || "外设")} 板载 Flash 脱离软件独立触发。</span>
+          <button type="button" class="btn btn-primary btn-sm" id="macro-new-btn-empty">${icon("plus", 14)}新建宏</button>
+        </div>
+      </section>`;
+
+  return `
+    <div class="workbench is-macro">
+      <aside class="card macro-lib-card">
+        <div class="card-head">
+          <div>
+            <h2 class="card-title">本地宏库</h2>
+            <p class="card-desc">共 <span class="mono">${list.length}</span> 条 · 跨键鼠共享</p>
+          </div>
+          <div class="card-actions">
+            <button type="button" class="tool-icon-btn" id="macro-import-btn" title="导入宏（支持 JSON 与官方 Goper .mac）" ${recording ? "disabled" : ""}>${icon("upload", 14)}</button>
+            <button type="button" class="tool-icon-btn" id="macro-export-btn" title="导出宏库为 JSON" ${list.length === 0 || recording ? "disabled" : ""}>${icon("download", 14)}</button>
+            <button type="button" class="btn btn-primary btn-sm" id="macro-new-btn" ${recording ? "disabled" : ""}>${icon("plus", 13)}新建</button>
+          </div>
+        </div>
+
+        <div class="macro-list" id="macro-list">
+          ${listHtml}
+        </div>
+
+        <div class="macro-flash-box${overLimit ? " is-over" : ""}">
+          <div class="row">
+            <span class="field-label">设备板载容量 (OP 0x15)</span>
+            <span class="mono field-label">${usedBytes} / ${capacityBytes} B</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar${overLimit ? " is-over" : pct >= 80 ? " is-warn" : ""}" style="width:${pct}%"></div>
+          </div>
+          <span class="macro-flash-hint">${overLimit ? `已超出 ${usedBytes - capacityBytes} B，请精简动作后再写入` : `剩余约 ${remainEvents} 条动作空间 · 写入后断电持久保存`}</span>
+        </div>
+
+        <div class="stack-sm">
+          <button type="button" class="btn btn-primary" id="macro-sync-device-btn" ${readOnly || overLimit || recording ? "disabled" : ""}>
+            ${icon("check", 14)}同步写入 ${esc(device?.model || "当前设备")}
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm" id="macro-goto-keymap-btn" ${!active || recording ? "disabled" : ""}>
+            ${icon("command", 13)}前往按键映射绑定当前宏
+          </button>
+        </div>
+      </aside>
+
+      ${editorHtml}
     </div>`;
 }

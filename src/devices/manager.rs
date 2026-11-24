@@ -21,6 +21,7 @@ use crate::devices::hid_win::{enumerate_hid_devices, HidDeviceInfo};
 use crate::devices::keyboard::{KeyboardAdapter, SavedDirectLightState};
 use crate::devices::mouse::MouseAdapter;
 use crate::devices::transport::Transport;
+use crate::protocol::macro_proto::MacroDef;
 use crate::protocol::POLL_STATUS;
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,6 +144,31 @@ impl DeviceSession {
         match self {
             Self::Keyboard(a) => a.reset_all_keys().map_err(|e| e.to_string()),
             Self::Mouse(a) => a.reset_all_keys().map_err(|e| e.to_string()),
+        }
+    }
+
+    fn write_macros(&mut self, macros: &[MacroDef]) -> Result<Value, String> {
+        match self {
+            Self::Keyboard(a) => a.write_macros(macros).map_err(|e| e.to_string()),
+            Self::Mouse(a) => a.write_macros(macros).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn bind_macro_key(
+        &mut self,
+        slot: usize,
+        macros: &[MacroDef],
+        macro_index: usize,
+        trigger_mode: u8,
+        repeat_count: u8,
+    ) -> Result<Value, String> {
+        match self {
+            Self::Keyboard(a) => a
+                .bind_macro_key(slot, macros, macro_index, trigger_mode, repeat_count)
+                .map_err(|e| e.to_string()),
+            Self::Mouse(a) => a
+                .bind_macro_key(slot, macros, macro_index, trigger_mode, repeat_count)
+                .map_err(|e| e.to_string()),
         }
     }
 }
@@ -765,6 +791,30 @@ impl DeviceManager {
         Self::ensure_session(&mut inner, device_id)?.reset_all_keys()
     }
 
+    pub fn write_macros(&self, device_id: &str, macros: &[MacroDef]) -> Result<Value, String> {
+        let mut inner = self.inner.lock().unwrap();
+        Self::ensure_session(&mut inner, device_id)?.write_macros(macros)
+    }
+
+    pub fn bind_macro_key(
+        &self,
+        device_id: &str,
+        slot: usize,
+        macros: &[MacroDef],
+        macro_index: usize,
+        trigger_mode: u8,
+        repeat_count: u8,
+    ) -> Result<Value, String> {
+        let mut inner = self.inner.lock().unwrap();
+        Self::ensure_session(&mut inner, device_id)?.bind_macro_key(
+            slot,
+            macros,
+            macro_index,
+            trigger_mode,
+            repeat_count,
+        )
+    }
+
     pub fn upload_screen_image<F>(
         &self,
         device_id: &str,
@@ -1182,5 +1232,58 @@ mod tests {
         assert!(!mgr.has_any_direct_rgb());
         let after_tray = mgr.read_state("kb-1s").unwrap();
         assert_eq!(after_tray["config"]["light"]["mode"], 18);
+
+        // 7. 板载宏表 OP 0x15 同步 + OP 0x09 键位绑定 (有线键盘 + 2.4G 鼠标)
+        use crate::protocol::macro_proto::{MacroEvent, TRIGGER_REPEAT_COUNT, TRIGGER_STOP_IMMEDIATE};
+        let demo_macros = vec![
+            MacroDef {
+                id: "m1".into(),
+                name: "连招 1".into(),
+                delay_mode: "fixed".into(),
+                fixed_delay_ms: 15,
+                events: vec![
+                    MacroEvent { kind: "key".into(), code: 0x04, down: true, delay_ms: 15, label: "A".into() },
+                    MacroEvent { kind: "key".into(), code: 0x04, down: false, delay_ms: 0, label: "A".into() },
+                ],
+                updated_at: 0,
+            },
+            MacroDef {
+                id: "m2".into(),
+                name: "左键连点".into(),
+                delay_mode: "fixed".into(),
+                fixed_delay_ms: 25,
+                events: vec![
+                    MacroEvent { kind: "mouse".into(), code: 0x01, down: true, delay_ms: 25, label: "鼠标左键".into() },
+                    MacroEvent { kind: "mouse".into(), code: 0x01, down: false, delay_ms: 25, label: "鼠标左键".into() },
+                ],
+                updated_at: 0,
+            },
+        ];
+
+        assert_eq!(kb_st["macroCapacityBytes"], 3072);
+        assert_eq!(ms_st["macroCapacityBytes"], 3072);
+
+        let kb_bind = mgr
+            .bind_macro_key("kb-1s", 6, &demo_macros, 0, TRIGGER_REPEAT_COUNT, 3)
+            .unwrap();
+        assert_eq!(kb_bind["ok"], true);
+        assert_eq!(kb_bind["hex"], "710003");
+        assert_eq!(kb_bind["decoded"]["kind"], "macro");
+        assert_eq!(kb_bind["decoded"]["macroIndex"], 0);
+        assert_eq!(kb_bind["decoded"]["macroMode"], 4);
+        assert_eq!(kb_bind["decoded"]["macroRepeat"], 3);
+        assert_eq!(kb_bind["bytesWritten"], 44);
+        assert_eq!(kb_bind["capacityBytes"], 3072);
+
+        // 2.4G 鼠标 24B 分包写入 OP 0x15 + OP 0x09 绑定侧键 #3
+        let ms_bind = mgr
+            .bind_macro_key("ms-1s", 3, &demo_macros, 1, TRIGGER_STOP_IMMEDIATE, 1)
+            .unwrap();
+        assert_eq!(ms_bind["ok"], true);
+        assert_eq!(ms_bind["hex"], "700103");
+        assert_eq!(ms_bind["decoded"]["kind"], "macro");
+        assert_eq!(ms_bind["decoded"]["macroIndex"], 1);
+        assert_eq!(ms_bind["decoded"]["macroMode"], 3);
+        assert_eq!(ms_bind["bytesWritten"], 44);
     }
 }

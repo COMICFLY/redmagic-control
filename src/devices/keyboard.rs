@@ -13,12 +13,16 @@ use crate::devices::screen_lib::{
     SCREEN_FLASH_BLOCK, SCREEN_H, SCREEN_PIXEL_BYTES, SCREEN_W,
 };
 use crate::devices::transport::{default_kb_config, Transport, TransportError};
+use crate::protocol::macro_proto::{
+    encode_macro_assignment_hex, encode_macro_table, macro_flash_capacity_from_info, MacroDef,
+};
 use crate::protocol::usage::{build_default_kb_rom, bytes_to_hex3, decode_assignment, hex3_to_bytes};
 use crate::protocol::{
-    CHUNK_SIZE, CUSTOM_RGB_GROUP_STRIDE, KB_LOGO_MODE_DIRECT, KB_MODE_CUSTOM, KB_MODE_DIRECT,
-    LOGO_RGB_LEN, POLL_STATUS, PREPARE_SCREEN_IMG, READ_CONFIG, READ_CUSTOM_RGB, READ_INFO,
-    READ_KEYMAP_ROM, READ_KEYMAP_USER, STREAM_KEY_RGB, STREAM_LOGO_RGB, WRITE_CONFIG,
-    WRITE_CUSTOM_RGB, WRITE_KEYMAP, WRITE_SCREEN_IMG,
+    CHUNK_SIZE, CUSTOM_RGB_GROUP_STRIDE, DEFAULT_MACRO_FLASH_BYTES, KB_LOGO_MODE_DIRECT,
+    KB_MODE_CUSTOM, KB_MODE_DIRECT, LOGO_RGB_LEN, POLL_STATUS, PREPARE_SCREEN_IMG, READ_CONFIG,
+    READ_CUSTOM_RGB, READ_INFO, READ_KEYMAP_ROM, READ_KEYMAP_USER, STREAM_KEY_RGB,
+    STREAM_LOGO_RGB, WRITE_CONFIG, WRITE_CUSTOM_RGB, WRITE_KEYMAP, WRITE_MACRO_TABLE,
+    WRITE_SCREEN_IMG,
 };
 
 pub const CONFIG_LEN: usize = 0x32; // 50 字节
@@ -200,6 +204,7 @@ pub struct KeyboardAdapter {
     pub t: Transport,
     pub link_id: String,
     rom_cache: Option<Vec<u8>>,
+    macro_capacity_bytes: usize,
     last_state: Option<Value>,
     mock_screen: Option<PersistedScreenState>,
 }
@@ -210,6 +215,7 @@ impl KeyboardAdapter {
             t: transport,
             link_id,
             rom_cache: None,
+            macro_capacity_bytes: DEFAULT_MACRO_FLASH_BYTES,
             last_state: cached_state,
             mock_screen: None,
         }
@@ -274,6 +280,7 @@ impl KeyboardAdapter {
             "chargingState": charging_state,
             "capabilityHex": Value::Null,
             "hwKeyCount": KEY_SLOTS,
+            "macroCapacityBytes": self.macro_capacity_bytes,
             "config": decode_kb_config(&default_kb_config()),
             "screenImage": read_persisted_screen_state(),
             "keymap": keymap,
@@ -365,6 +372,7 @@ impl KeyboardAdapter {
             .as_ref()
             .and_then(|b| (b.len() > 5 && b[5] > 0).then_some(b[5] as usize))
             .unwrap_or(KEY_SLOTS);
+        self.macro_capacity_bytes = macro_flash_capacity_from_info(info_buf.as_deref());
         let screen_img = if self.t.is_mock() {
             self.mock_screen
                 .clone()
@@ -386,6 +394,7 @@ impl KeyboardAdapter {
             "chargingState": charging,
             "capabilityHex": capability_hex,
             "hwKeyCount": hw_key_count,
+            "macroCapacityBytes": self.macro_capacity_bytes,
             "config": decode_kb_config(&cfg_buf),
             "screenImage": screen_img,
             "keymap": keymap,
@@ -476,6 +485,46 @@ impl KeyboardAdapter {
             "ok": verify == rom,
             "mock": self.t.is_mock(),
         }))
+    }
+
+    pub fn write_macros(&mut self, macros: &[MacroDef]) -> Result<Value, TransportError> {
+        self.ensure_writable()?;
+        if let Ok(info) = self.t.read_blob(READ_INFO, 0x22, 0) {
+            self.macro_capacity_bytes = macro_flash_capacity_from_info(Some(&info));
+        }
+        let capacity = self.macro_capacity_bytes;
+        let blob = encode_macro_table(macros, capacity).map_err(TransportError::Io)?;
+        self.t.write_blob_tx(WRITE_MACRO_TABLE, &blob, 0)?;
+        Ok(json!({
+            "ok": true,
+            "mock": self.t.is_mock(),
+            "bytesWritten": blob.len(),
+            "capacityBytes": capacity,
+            "macroCount": macros.len(),
+        }))
+    }
+
+    pub fn bind_macro_key(
+        &mut self,
+        slot: usize,
+        macros: &[MacroDef],
+        macro_index: usize,
+        trigger_mode: u8,
+        repeat_count: u8,
+    ) -> Result<Value, TransportError> {
+        if macro_index >= macros.len() || macro_index > 255 {
+            return Err(TransportError::Io(format!("无效宏索引：{macro_index}")));
+        }
+        let sync_res = self.write_macros(macros)?;
+        let hex = encode_macro_assignment_hex(macro_index as u8, trigger_mode, repeat_count)
+            .map_err(TransportError::Io)?;
+        let mut key_res = self.write_key(slot, &hex)?;
+        if let Some(obj) = key_res.as_object_mut() {
+            obj.insert("bytesWritten".into(), sync_res["bytesWritten"].clone());
+            obj.insert("capacityBytes".into(), sync_res["capacityBytes"].clone());
+            obj.insert("macroCount".into(), sync_res["macroCount"].clone());
+        }
+        Ok(key_res)
     }
 
     pub fn upload_screen_image<F>(

@@ -199,7 +199,10 @@ export function renderKeyboardStage(device, hwState, { interactiveKeys = false, 
       const width = ((k.w / KB_CROP.w) * 100).toFixed(3);
       const height = ((k.h / KB_CROP.h) * 100).toFixed(3);
       const tip = row ? `${k.name}（槽位 #${k.hwSlot}）· 当前：${row.current.label}` : k.name;
-      return `<button type="button" class="kb-key-hit${isSel ? " is-selected" : ""}${isMod ? " is-modified" : ""}" data-select-slot="${k.hwSlot}" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${isSel}"><span class="kb-hit-cap">${esc(isMod && row ? row.current.label : "")}</span></button>`;
+      const shortCap = isMod && row
+        ? (row.current.kind === "macro" && row.current.macroIndex != null ? `M${row.current.macroIndex + 1}` : row.current.label)
+        : "";
+      return `<button type="button" class="kb-key-hit${isSel ? " is-selected" : ""}${isMod ? " is-modified" : ""}" data-select-slot="${k.hwSlot}" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${isSel}"><span class="kb-hit-cap">${esc(shortCap)}</span></button>`;
     }).join("");
   } else if (paintKeys) {
     hitLayerHtml = KB_STAGE.keys.map((k) => {

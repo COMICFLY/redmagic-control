@@ -1,7 +1,7 @@
 /* 轻量前端主控制器：统一状态、IPC 驱动、键盘物理录入与实时硬件同步。 */
 
 import { icon } from "./icons.js";
-import { renderConnectionBanner, renderPageTelemetry, renderOverview, renderLighting, renderKeymap, renderScreen, renderHardware, renderStudio, renderAbout, renderUpdateModal, formatUpdateProgressMeta } from "./panels.js";
+import { renderConnectionBanner, renderPageTelemetry, renderOverview, renderLighting, renderKeymap, renderMacros, renderMacroEventRowsHtml, renderScreen, renderHardware, renderStudio, renderAbout, renderUpdateModal, formatUpdateProgressMeta, computeMacroDurationMs } from "./panels.js";
 import { renderBatteryGauge, renderConnectionBadge } from "./stage.js";
 import { LightingAnimator } from "./lighting.js";
 import {
@@ -21,13 +21,14 @@ const lighting = new LightingAnimator();
 const studioCtrl = new StudioController();
 
 const TABS = [
-  { id: "overview", label: "概览与性能", ico: "sliders" },
-  { id: "lighting", label: "灯光", ico: "sun" },
-  { id: "studio", label: "灯效编程", ico: "sparkles", kbOnly: true },
-  { id: "keymap", label: "按键映射", ico: "command" },
-  { id: "screen", label: "小屏图片", ico: "monitor", kbOnly: true },
-  { id: "hardware", label: "硬件诊断", ico: "cpu" },
-  { id: "about", label: "关于", ico: "info" },
+  { id: "overview", label: "概览与性能", navLabel: "概览", ico: "sliders" },
+  { id: "lighting", label: "灯光", navLabel: "灯光", ico: "sun" },
+  { id: "studio", label: "灯效编程", navLabel: "灯效编程", ico: "sparkles", kbOnly: true },
+  { id: "keymap", label: "按键映射", navLabel: "改键", ico: "command" },
+  { id: "macro", label: "宏管理", navLabel: "宏管理", ico: "repeat" },
+  { id: "screen", label: "小屏图片", navLabel: "小屏", ico: "monitor", kbOnly: true },
+  { id: "hardware", label: "硬件诊断", navLabel: "诊断", ico: "cpu" },
+  { id: "about", label: "关于", navLabel: "关于", ico: "info" },
 ];
 
 const CODE_TO_HEX = {
@@ -62,7 +63,18 @@ const state = {
     selectedSlot: null,
     keyCategory: null,
     pendingHex: null,
+    keyMacroIndex: 0,
+    keyMacroMode: 0,
+    keyMacroRepeat: 1,
     capturingKey: false,
+    macro: {
+      list: [],
+      selectedId: null,
+      recording: false,
+      recordMouse: false,
+      recordBaseCount: 0,
+      path: "",
+    },
     screenSourceKind: "library",
     screenSelectedUuid: null,
     screenLibImages: new Map(),
@@ -158,7 +170,7 @@ function renderNavTabs() {
   const visibleTabs = TABS.filter((t) => !t.kbOnly || isKb);
   const hasUpd = Boolean(state.ui.update?.info?.hasUpdate);
   $("#nav-tabs").innerHTML = visibleTabs.map((t) =>
-    `<button type="button" class="nav-tab" role="tab" data-tab="${t.id}" aria-selected="${state.tab === t.id}">${icon(t.ico, 15)}<span>${t.label}</span>${t.id === "about" && hasUpd ? '<span class="nav-update-dot" aria-label="发现新版本"></span>' : ""}</button>`
+    `<button type="button" class="nav-tab" role="tab" data-tab="${t.id}" title="${esc(t.label)}" aria-selected="${state.tab === t.id}">${icon(t.ico, 14)}<span>${t.navLabel || t.label}</span>${t.id === "about" && hasUpd ? '<span class="nav-update-dot" aria-label="发现新版本"></span>' : ""}</button>`
   ).join("");
   const verBtn = $("#app-version");
   if (verBtn) verBtn.classList.toggle("has-update", hasUpd);
@@ -724,6 +736,7 @@ function renderWorkspace() {
   else if (state.tab === "lighting") bodyHtml = renderLighting(dev, hw, state.meta, state.ui);
   else if (state.tab === "studio") bodyHtml = renderStudio(dev, hw, state.ui);
   else if (state.tab === "keymap") bodyHtml = renderKeymap(dev, hw, state.meta, state.ui);
+  else if (state.tab === "macro") bodyHtml = renderMacros(dev, hw, state.ui);
   else if (state.tab === "screen") bodyHtml = renderScreen(dev, hw, state.ui);
   else bodyHtml = renderHardware(dev, hw);
 
@@ -1087,11 +1100,88 @@ function selectSlot(slot) {
   state.ui.capturingKey = false;
   if (row) {
     state.ui.pendingHex = row.hex;
-    state.ui.keyCategory = row.current.kind === "mouse" || row.current.kind === "dpi" ? "mouse"
-      : row.current.kind === "media" ? "media"
-      : row.current.kind === "disable" ? "disable" : "key";
+    if (row.current.kind === "macro") {
+      state.ui.keyCategory = "macro";
+      if (row.current.macroIndex != null) state.ui.keyMacroIndex = row.current.macroIndex;
+      if (row.current.macroMode != null) state.ui.keyMacroMode = row.current.macroMode;
+      if (row.current.macroRepeat != null) state.ui.keyMacroRepeat = row.current.macroRepeat;
+    } else {
+      state.ui.keyCategory = row.current.kind === "mouse" || row.current.kind === "dpi" ? "mouse"
+        : row.current.kind === "media" ? "media"
+        : row.current.kind === "disable" ? "disable" : "key";
+    }
   }
   renderWorkspace();
+}
+
+/* ---- 宏管理核心助手：增删改、防抖落盘、500Hz 实时录制与设备同步 ---- */
+let macroSaveTimer = null;
+
+function activeMacroItem() {
+  const ms = state.ui.macro;
+  if (!ms.list.length) return null;
+  let found = ms.list.find((m) => m.id === ms.selectedId);
+  if (!found) {
+    found = ms.list[0];
+    ms.selectedId = found.id;
+  }
+  return found;
+}
+
+function makeMacroId() {
+  return `macro-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+async function persistMacrosNow() {
+  if (macroSaveTimer) {
+    clearTimeout(macroSaveTimer);
+    macroSaveTimer = null;
+  }
+  if (!window.rm?.saveMacros) return;
+  try {
+    const res = await callApi("saveMacros", state.ui.macro.list);
+    if (res && Array.isArray(res.macros)) {
+      state.ui.macro.list = res.macros;
+    }
+  } catch (err) {
+    toast("保存宏库失败", err.message, true);
+  }
+}
+
+function scheduleMacroSave(immediate = false) {
+  if (immediate) return persistMacrosNow();
+  if (macroSaveTimer) clearTimeout(macroSaveTimer);
+  macroSaveTimer = setTimeout(() => {
+    macroSaveTimer = null;
+    persistMacrosNow();
+  }, 240);
+}
+
+async function stopMacroRecordingIfActive({ silent = false } = {}) {
+  const ms = state.ui.macro;
+  if (!ms.recording) return;
+  ms.recording = false;
+  try {
+    const res = await callApi("stopMacroRecord");
+    const active = activeMacroItem();
+    if (active && Array.isArray(res?.events)) {
+      const prefix = active.events.slice(0, ms.recordBaseCount || 0);
+      active.events = [...prefix, ...res.events];
+      active.updatedAt = Date.now();
+      await persistMacrosNow();
+      if (!silent) {
+        toast("录制已完成", `共采集 ${res.events.length} 条动作，总计 ${active.events.length} 条`);
+      }
+    }
+  } catch (err) {
+    if (!silent) toast("停止录制异常", err.message, true);
+  }
+}
+
+function formatMoveLabel(kind, code, down) {
+  const px = Math.max(1, Math.min(255, Number(code) || 1));
+  if (kind === "moveX") return `鼠标${down ? "左移" : "右移"} ${px} px`;
+  return `鼠标${down ? "上移" : "下移"} ${px} px`;
 }
 
 function bindEvents() {
@@ -1099,6 +1189,8 @@ function bindEvents() {
   $("#win-min").addEventListener("click", () => window.rm?.win.minimize());
   $("#win-max").addEventListener("click", () => window.rm?.win.toggleMax());
   $("#win-close").addEventListener("click", async () => {
+    if (state.ui.macro.recording) await stopMacroRecordingIfActive({ silent: true });
+    if (macroSaveTimer) await persistMacrosNow();
     if (studioPersistTimer) await scheduleStudioPersist(true);
     window.rm?.win.close();
   });
@@ -1107,6 +1199,9 @@ function bindEvents() {
   $("#nav-tabs").addEventListener("click", async (e) => {
     const btn = e.target.closest("[data-tab]");
     if (!btn) return;
+    if (state.ui.macro.recording && btn.dataset.tab !== "macro") {
+      await stopMacroRecordingIfActive({ silent: true });
+    }
     const prevTab = state.tab;
     state.tab = btn.dataset.tab;
     state.ui.capturingKey = false;
@@ -1281,7 +1376,7 @@ function bindEvents() {
   }
 
   ws.addEventListener("click", async (e) => {
-    const el = e.target.closest("button, [data-screen-lib-uuid]");
+    const el = e.target.closest("button, [data-screen-lib-uuid], [data-macro-select]");
     if (!el) return;
 
     if (el.dataset.lightZone) {
@@ -1344,10 +1439,17 @@ function bindEvents() {
     if (el.dataset.keyCat) {
       state.ui.keyCategory = el.dataset.keyCat;
       state.ui.capturingKey = false;
-      state.ui.pendingHex = el.dataset.keyCat === "disable" ? "a00000"
-        : el.dataset.keyCat === "mouse" ? "100100"
-        : el.dataset.keyCat === "media" ? "3000e9" : "200029";
+      if (el.dataset.keyCat !== "macro") {
+        state.ui.pendingHex = el.dataset.keyCat === "disable" ? "a00000"
+          : el.dataset.keyCat === "mouse" ? "100100"
+          : el.dataset.keyCat === "media" ? "3000e9" : "200029";
+      }
       renderWorkspace();
+      return;
+    }
+    if (el.id === "goto-macro-create-btn") {
+      state.tab = "macro";
+      renderAll();
       return;
     }
     if (el.id === "capture-key-btn") {
@@ -1358,6 +1460,32 @@ function bindEvents() {
     if (el.id === "save-one-key-btn") {
       const dev = currentDevice();
       const slot = state.ui.selectedSlot ?? (dev.kind === "keyboard" ? 0 : 3);
+      if (state.ui.keyCategory === "macro") {
+        const macros = state.ui.macro.list || [];
+        if (!macros.length) {
+          toast("宏库为空", "请先在「宏管理」新建并录制一条宏", true);
+          return;
+        }
+        const mIdx = Math.max(0, Math.min(macros.length - 1, Number($("#key-macro-index")?.value ?? state.ui.keyMacroIndex ?? 0)));
+        const mMode = Math.max(0, Math.min(4, Number($("#key-macro-mode")?.value ?? state.ui.keyMacroMode ?? 0)));
+        const mRep = Math.max(1, Math.min(255, Number($("#key-macro-repeat")?.value ?? state.ui.keyMacroRepeat ?? 1)));
+        state.ui.keyMacroIndex = mIdx;
+        state.ui.keyMacroMode = mMode;
+        state.ui.keyMacroRepeat = mRep;
+        state.busy = true;
+        setSyncText("同步宏并写入键位...", "is-busy");
+        try {
+          await callApi("bindMacroKey", dev.id, slot, mIdx, mMode, mRep, macros);
+          await loadDeviceState(dev.id);
+          const mName = macros[mIdx]?.name || `宏 #${mIdx + 1}`;
+          toast("宏键位已写入设备", `槽位 #${slot} → ${mName}（宏表已同步至板载 Flash）`);
+        } catch (err) {
+          toast("写入宏键位失败", err.message, true);
+        } finally {
+          state.busy = false;
+        }
+        return;
+      }
       const hex = state.ui.keyCategory === "disable" ? "a00000" : ($("#key-preset-select")?.value || state.ui.pendingHex);
       if (!hex) return;
       state.busy = true;
@@ -1371,6 +1499,278 @@ function bindEvents() {
       } finally {
         state.busy = false;
       }
+      return;
+    }
+
+    /* ---- 宏管理工作台交互 ---- */
+    if (el.id === "macro-new-btn" || el.id === "macro-new-btn-empty") {
+      const ms = state.ui.macro;
+      const idx = ms.list.length + 1;
+      const created = {
+        id: makeMacroId(),
+        name: `宏 ${idx}`,
+        delayMode: "recorded",
+        fixedDelayMs: 20,
+        events: [],
+        updatedAt: Date.now(),
+      };
+      ms.list.push(created);
+      ms.selectedId = created.id;
+      await persistMacrosNow();
+      renderWorkspace();
+      const nameInput = $("#macro-name-input");
+      if (nameInput) { nameInput.focus(); nameInput.select(); }
+      return;
+    }
+    if (el.dataset.macroDup) {
+      e.stopPropagation();
+      const ms = state.ui.macro;
+      const src = ms.list.find((m) => m.id === el.dataset.macroDup);
+      if (!src) return;
+      const copy = {
+        ...src,
+        id: makeMacroId(),
+        name: `${src.name} 副本`.slice(0, 40),
+        events: (src.events || []).map((ev) => ({ ...ev })),
+        updatedAt: Date.now(),
+      };
+      ms.list.push(copy);
+      ms.selectedId = copy.id;
+      await persistMacrosNow();
+      renderWorkspace();
+      toast("已复制宏", copy.name);
+      return;
+    }
+    if (el.dataset.macroDel) {
+      e.stopPropagation();
+      const ms = state.ui.macro;
+      const idx = ms.list.findIndex((m) => m.id === el.dataset.macroDel);
+      if (idx < 0) return;
+      const removed = ms.list.splice(idx, 1)[0];
+      if (ms.selectedId === removed.id) {
+        ms.selectedId = ms.list[Math.max(0, idx - 1)]?.id || ms.list[0]?.id || null;
+      }
+      await persistMacrosNow();
+      renderWorkspace();
+      toast("已删除宏", removed.name);
+      return;
+    }
+    if (el.dataset.macroSelect) {
+      if (state.ui.macro.recording) return;
+      state.ui.macro.selectedId = el.dataset.macroSelect;
+      renderWorkspace();
+      return;
+    }
+    if (el.id === "macro-import-btn") {
+      try {
+        const res = await callApi("importMacros");
+        if (!res || res.canceled || !Array.isArray(res.macros)) return;
+        const ms = state.ui.macro;
+        let added = 0;
+        for (const item of res.macros) {
+          const fresh = { ...item, id: makeMacroId(), updatedAt: Date.now() };
+          ms.list.push(fresh);
+          ms.selectedId = fresh.id;
+          added++;
+        }
+        await persistMacrosNow();
+        renderWorkspace();
+        toast("导入宏成功", `已新增 ${added} 条宏到本地宏库`);
+      } catch (err) {
+        toast("导入宏失败", err.message, true);
+      }
+      return;
+    }
+    if (el.id === "macro-export-btn") {
+      const ms = state.ui.macro;
+      if (!ms.list.length) return;
+      try {
+        const res = await callApi("exportMacros", "redmagic-macros.json", ms.list);
+        if (res && !res.canceled) {
+          toast("导出宏库成功", res.filePath || "已保存 JSON 文件");
+        }
+      } catch (err) {
+        toast("导出宏库失败", err.message, true);
+      }
+      return;
+    }
+    if (el.id === "macro-record-btn") {
+      const ms = state.ui.macro;
+      const active = activeMacroItem();
+      if (!active) return;
+      if (ms.recording) {
+        await stopMacroRecordingIfActive({ silent: false });
+        renderWorkspace();
+        return;
+      }
+      ms.recordBaseCount = active.events.length;
+      ms.recording = true;
+      renderWorkspace();
+      try {
+        await callApi(
+          "startMacroRecord",
+          Boolean(ms.recordMouse),
+          active.delayMode || "recorded",
+          Number(active.fixedDelayMs) || 20
+        );
+      } catch (err) {
+        ms.recording = false;
+        renderWorkspace();
+        toast("启动录制失败", err.message, true);
+      }
+      return;
+    }
+    if (el.dataset.macroDelayMode) {
+      const active = activeMacroItem();
+      if (!active) return;
+      active.delayMode = el.dataset.macroDelayMode;
+      active.updatedAt = Date.now();
+      scheduleMacroSave();
+      renderWorkspace();
+      return;
+    }
+    if (el.id === "macro-insert-pair-btn") {
+      const active = activeMacroItem();
+      const sel = $("#macro-insert-preset");
+      if (!active || !sel?.value) return;
+      const [kind, codeStr, ...labelParts] = sel.value.split(":");
+      const code = Number(codeStr);
+      const label = labelParts.join(":");
+      const d = active.delayMode === "none" ? 1 : (Number(active.fixedDelayMs) || 20);
+      if (active.events.length > 0 && (Number(active.events[active.events.length - 1].delayMs) || 0) === 0) {
+        active.events[active.events.length - 1].delayMs = d;
+      }
+      active.events.push(
+        { kind, code, down: true, delayMs: d, label },
+        { kind, code, down: false, delayMs: 0, label }
+      );
+      active.updatedAt = Date.now();
+      scheduleMacroSave();
+      renderWorkspace();
+      const tl = $("#macro-timeline");
+      if (tl) tl.scrollTop = tl.scrollHeight;
+      return;
+    }
+    if (el.id === "macro-insert-move-btn") {
+      const active = activeMacroItem();
+      if (!active) return;
+      const dx = Math.max(-255, Math.min(255, Math.round(Number($("#macro-move-x")?.value) || 0)));
+      const dy = Math.max(-255, Math.min(255, Math.round(Number($("#macro-move-y")?.value) || 0)));
+      if (dx === 0 && dy === 0) {
+        toast("请输入非零位移", "X 或 Y 至少填写一项（-255 ~ 255 像素）", true);
+        return;
+      }
+      const d = active.delayMode === "none" ? 1 : (Number(active.fixedDelayMs) || 20);
+      if (dx !== 0) {
+        const down = dx < 0;
+        const px = Math.abs(dx);
+        active.events.push({ kind: "moveX", code: px, down, delayMs: dy !== 0 ? 0 : d, label: formatMoveLabel("moveX", px, down) });
+      }
+      if (dy !== 0) {
+        const down = dy < 0;
+        const px = Math.abs(dy);
+        active.events.push({ kind: "moveY", code: px, down, delayMs: d, label: formatMoveLabel("moveY", px, down) });
+      }
+      active.updatedAt = Date.now();
+      scheduleMacroSave();
+      renderWorkspace();
+      const tl = $("#macro-timeline");
+      if (tl) tl.scrollTop = tl.scrollHeight;
+      return;
+    }
+    if (el.id === "macro-apply-delay-all") {
+      const active = activeMacroItem();
+      if (!active || !active.events.length) return;
+      const d = Math.max(1, Math.min(65535, Number(active.fixedDelayMs) || 20));
+      active.events.forEach((ev, idx) => {
+        ev.delayMs = idx === active.events.length - 1 ? 0 : d;
+      });
+      active.updatedAt = Date.now();
+      scheduleMacroSave();
+      renderWorkspace();
+      toast("已统一设置延时", `所有动作间隔已设为 ${d} ms`);
+      return;
+    }
+    if (el.id === "macro-clear-events-btn") {
+      const active = activeMacroItem();
+      if (!active || !active.events.length) return;
+      active.events = [];
+      active.updatedAt = Date.now();
+      await persistMacrosNow();
+      renderWorkspace();
+      toast("已清空动作列表", active.name);
+      return;
+    }
+    if (el.hasAttribute("data-macro-ev-toggle")) {
+      const active = activeMacroItem();
+      const rowEl = el.closest("[data-macro-ev-idx]");
+      const idx = rowEl ? Number(rowEl.dataset.macroEvIdx) : -1;
+      if (!active || idx < 0 || idx >= active.events.length) return;
+      const ev = active.events[idx];
+      ev.down = !ev.down;
+      if (ev.kind === "moveX" || ev.kind === "moveY") {
+        ev.label = formatMoveLabel(ev.kind, ev.code, ev.down);
+      }
+      active.updatedAt = Date.now();
+      scheduleMacroSave();
+      renderWorkspace();
+      return;
+    }
+    if (el.dataset.macroEvTop !== undefined || el.dataset.macroEvUp !== undefined || el.dataset.macroEvDown !== undefined || el.dataset.macroEvDel !== undefined) {
+      const active = activeMacroItem();
+      if (!active) return;
+      const evs = active.events;
+      if (el.dataset.macroEvTop !== undefined) {
+        const i = Number(el.dataset.macroEvTop);
+        if (i > 0 && i < evs.length) {
+          const [it] = evs.splice(i, 1);
+          evs.unshift(it);
+        }
+      } else if (el.dataset.macroEvUp !== undefined) {
+        const i = Number(el.dataset.macroEvUp);
+        if (i > 0 && i < evs.length) [evs[i - 1], evs[i]] = [evs[i], evs[i - 1]];
+      } else if (el.dataset.macroEvDown !== undefined) {
+        const i = Number(el.dataset.macroEvDown);
+        if (i >= 0 && i + 1 < evs.length) [evs[i], evs[i + 1]] = [evs[i + 1], evs[i]];
+      } else if (el.dataset.macroEvDel !== undefined) {
+        const i = Number(el.dataset.macroEvDel);
+        if (i >= 0 && i < evs.length) evs.splice(i, 1);
+      }
+      active.updatedAt = Date.now();
+      scheduleMacroSave();
+      renderWorkspace();
+      return;
+    }
+    if (el.id === "macro-sync-device-btn") {
+      const dev = currentDevice();
+      if (!dev) return;
+      await persistMacrosNow();
+      state.busy = true;
+      setSyncText("写入板载宏...", "is-busy");
+      try {
+        const res = await callApi("syncMacros", dev.id, state.ui.macro.list);
+        setSyncText(res.mock ? "仿真宏已同步" : "板载宏已同步", res.mock ? "is-mock" : "is-live");
+        toast("宏表已同步到设备", `${dev.model} · 写入 ${res.bytesWritten} / ${res.capacityBytes} B（共 ${res.macroCount} 条宏）`);
+      } catch (err) {
+        setSyncText("同步宏失败");
+        toast("同步宏失败", err.message, true);
+      } finally {
+        state.busy = false;
+        renderDeviceRail();
+      }
+      return;
+    }
+    if (el.id === "macro-goto-keymap-btn") {
+      const ms = state.ui.macro;
+      const idx = Math.max(0, ms.list.findIndex((m) => m.id === ms.selectedId));
+      state.ui.keyCategory = "macro";
+      state.ui.keyMacroIndex = idx;
+      state.tab = "keymap";
+      const dev = currentDevice();
+      if (dev && state.ui.selectedSlot === null) {
+        state.ui.selectedSlot = dev.kind === "keyboard" ? 0 : 3;
+      }
+      renderAll();
       return;
     }
     if (el.id === "reset-one-key-btn") {
@@ -1921,6 +2321,41 @@ function bindEvents() {
   // 滑块拖动即时更新标签数值，小屏缩放/底色/文字输入即时重绘预览，灯效编程热更新
   ws.addEventListener("input", (e) => {
     const el = e.target;
+    if (el.id === "macro-name-input") {
+      const active = activeMacroItem();
+      if (active) {
+        active.name = el.value.slice(0, 40);
+        active.updatedAt = Date.now();
+        const itemName = document.querySelector(`[data-macro-select="${CSS.escape(active.id)}"] .macro-list-name`);
+        if (itemName) itemName.textContent = active.name || "未命名宏";
+        scheduleMacroSave();
+      }
+      return;
+    }
+    if (el.id === "macro-fixed-delay") {
+      const active = activeMacroItem();
+      const v = Math.max(1, Math.min(10000, Math.round(Number(el.value) || 20)));
+      if (active) {
+        active.fixedDelayMs = v;
+        active.updatedAt = Date.now();
+        const btnAll = $("#macro-apply-delay-all");
+        if (btnAll) btnAll.innerHTML = `${icon("clock", 13)}统一 ${v}ms`;
+        scheduleMacroSave();
+      }
+      return;
+    }
+    if (el.dataset.macroEvDelay !== undefined) {
+      const active = activeMacroItem();
+      const idx = Number(el.dataset.macroEvDelay);
+      if (active && idx >= 0 && idx < active.events.length) {
+        active.events[idx].delayMs = Math.max(0, Math.min(65535, Math.round(Number(el.value) || 0)));
+        active.updatedAt = Date.now();
+        const durEl = $("#macro-stat-dur");
+        if (durEl) durEl.textContent = `${computeMacroDurationMs(active)} ms`;
+        scheduleMacroSave();
+      }
+      return;
+    }
     const st = state.ui.studio;
     if (el.id === "studio-code-editor") {
       st.scriptCode = el.value;
@@ -2358,6 +2793,34 @@ function bindEvents() {
       state.ui.pendingHex = el.value;
       return;
     }
+    if (el.id === "key-macro-index") {
+      state.ui.keyMacroIndex = Number(el.value) || 0;
+      return;
+    }
+    if (el.id === "key-macro-mode") {
+      state.ui.keyMacroMode = Number(el.value) || 0;
+      renderWorkspace();
+      return;
+    }
+    if (el.id === "key-macro-repeat") {
+      state.ui.keyMacroRepeat = Math.max(1, Math.min(255, Math.round(Number(el.value) || 1)));
+      el.value = String(state.ui.keyMacroRepeat);
+      return;
+    }
+    if (el.id === "macro-record-mouse") {
+      state.ui.macro.recordMouse = el.checked;
+      renderWorkspace();
+      return;
+    }
+    if (el.id === "macro-name-input") {
+      const active = activeMacroItem();
+      if (active && !active.name.trim()) {
+        active.name = `宏 ${Math.max(1, state.ui.macro.list.indexOf(active) + 1)}`;
+        el.value = active.name;
+      }
+      await persistMacrosNow();
+      return;
+    }
     if (el.id === "screen-bg-picker") {
       state.ui.screenBgColor = el.value;
       renderWorkspace();
@@ -2376,6 +2839,12 @@ function bindEvents() {
 
   // 键盘物理录入目标键 + Escape 关闭弹窗 + 屏蔽浏览器调试/刷新快捷键 + 小屏页面 Ctrl+V 快捷粘贴图片
   window.addEventListener("keydown", (e) => {
+    if (state.ui.macro.recording) {
+      // 宏录制期间屏蔽 WebView 焦点快捷键/空格触发按钮，所有按键交由 Rust 500Hz 底层采样器捕获
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (e.key === "Escape" && state.ui.update.modalOpen) {
       const locked = state.ui.update.installing && ["verifying", "installing"].includes(state.ui.update.progress?.stage);
       if (!locked) {
@@ -2446,6 +2915,25 @@ async function boot() {
     renderUpdateModalOverlay();
     if (state.tab === "about") renderWorkspace();
   });
+  window.rm?.onMacroRecordEvent?.((payload) => {
+    const ms = state.ui.macro;
+    if (!ms.recording || !payload?.event) return;
+    const active = activeMacroItem();
+    if (!active) return;
+    if (payload.prevDelayMs != null && active.events.length > (ms.recordBaseCount || 0)) {
+      active.events[active.events.length - 1].delayMs = payload.prevDelayMs;
+    }
+    active.events.push(payload.event);
+    const tl = $("#macro-timeline");
+    if (tl) {
+      tl.innerHTML = renderMacroEventRowsHtml(active.events);
+      tl.scrollTop = tl.scrollHeight;
+    }
+    const cntEl = $("#macro-stat-count");
+    const durEl = $("#macro-stat-dur");
+    if (cntEl) cntEl.textContent = `${active.events.length} 动作`;
+    if (durEl) durEl.textContent = `${computeMacroDurationMs(active)} ms`;
+  });
   window.rm?.onDeviceEvent?.(async (evt) => {
     if (!evt || state.ui.screenUploading) return;
     if (evt.type === "telemetry" && Array.isArray(evt.updates)) {
@@ -2464,8 +2952,8 @@ async function boot() {
         }
       }
       renderDeviceRail();
-      // 仅在非小屏/非灯效编程页刷新 KPI，避免打断取景裁切、脚本输入或拖拽涂色
-      if (activeChanged && state.tab !== "screen" && state.tab !== "studio") renderWorkspace();
+      // 仅在非小屏/非灯效编程/非宏编辑页刷新 KPI，避免打断取景裁切、脚本输入或宏录制
+      if (activeChanged && state.tab !== "screen" && state.tab !== "studio" && state.tab !== "macro") renderWorkspace();
       return;
     }
     if (evt.type === "topology" && Array.isArray(evt.devices)) {
@@ -2545,14 +3033,28 @@ async function boot() {
         }
       } catch (_) {}
     }
+    if (window.rm?.getMacros) {
+      try {
+        const mRes = await callApi("getMacros");
+        if (mRes && Array.isArray(mRes.macros)) {
+          state.ui.macro.list = mRes.macros;
+          state.ui.macro.selectedId = mRes.macros[0]?.id || null;
+          state.ui.macro.path = mRes.path || "";
+        }
+      } catch (_) {}
+    }
     state.devices = await callApi("listDevices");
     const params = new URLSearchParams(window.location.search);
     const initDev = params.get("device");
     const initTab = params.get("tab");
     const initSub = params.get("sub");
+    const initCat = params.get("cat");
     const initScript = params.get("script");
     const initStream = params.get("streaming") === "1";
     if (initTab && TABS.some((t) => t.id === initTab)) state.tab = initTab;
+    if (initCat && ["key", "mouse", "media", "macro", "disable"].includes(initCat)) {
+      state.ui.keyCategory = initCat;
+    }
     if (initSub && ["paint", "script", "layers", "api"].includes(initSub)) {
       state.ui.studio.subMode = initSub;
     }

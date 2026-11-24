@@ -12,6 +12,10 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::devices::catalog::get_metadata_json;
 use crate::devices::manager::{DeviceDescriptor, DeviceManager};
+use crate::macros::{MacroRecorder, MacroStore};
+use crate::protocol::macro_proto::{
+    compute_macro_table_size, parse_imported_macros, MacroDef, MacroLibrary,
+};
 use crate::settings::{open_directory_in_explorer, AppSettingsPatch, SettingsStore};
 use crate::studio::runner::NativeStreamConfig;
 use crate::studio::server::{DEFAULT_HTTP_PORT, DEFAULT_UDP_PORT};
@@ -25,6 +29,8 @@ pub struct AppState {
     pub manager: DeviceManager,
     pub studio: StudioEngine,
     pub settings: SettingsStore,
+    pub macros: MacroStore,
+    pub macro_recorder: MacroRecorder,
     pub pending_auto_resume: Arc<AtomicBool>,
     pub force_quit: Arc<AtomicBool>,
     pub update_in_progress: Arc<AtomicBool>,
@@ -718,4 +724,158 @@ pub async fn studio_import_preset() -> Result<Value, String> {
     })
     .await
     .map_err(|e| format!("导入对话框异常: {e}"))?
+}
+
+/* ---------------- 板载宏管理与实时录制 IPC ---------------- */
+
+#[tauri::command]
+pub fn macro_list_get(state: State<'_, AppState>) -> Value {
+    let macros = state.macros.list();
+    let total_bytes = compute_macro_table_size(&macros);
+    json!({
+        "macros": macros,
+        "totalBytes": total_bytes,
+        "path": state.macros.path_string(),
+        "recording": state.macro_recorder.is_recording(),
+    })
+}
+
+#[tauri::command]
+pub fn macro_list_save(state: State<'_, AppState>, macros: Vec<MacroDef>) -> Result<Value, String> {
+    let saved = state.macros.save_all(macros)?;
+    let total_bytes = compute_macro_table_size(&saved);
+    Ok(json!({
+        "macros": saved,
+        "totalBytes": total_bytes,
+        "path": state.macros.path_string(),
+    }))
+}
+
+#[tauri::command]
+pub async fn macro_sync_device(
+    state: State<'_, AppState>,
+    id: String,
+    macros: Option<Vec<MacroDef>>,
+) -> Result<Value, String> {
+    let list = match macros {
+        Some(m) => state.macros.save_all(m)?,
+        None => state.macros.list(),
+    };
+    let mgr = state.manager.clone();
+    tokio::task::spawn_blocking(move || mgr.write_macros(&id, &list))
+        .await
+        .map_err(|e| format!("同步宏表异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn macro_bind_key(
+    state: State<'_, AppState>,
+    id: String,
+    slot: usize,
+    macro_index: usize,
+    trigger_mode: u8,
+    repeat_count: Option<u8>,
+    macros: Option<Vec<MacroDef>>,
+) -> Result<Value, String> {
+    let list = match macros {
+        Some(m) => state.macros.save_all(m)?,
+        None => state.macros.list(),
+    };
+    let rep = repeat_count.unwrap_or(1).max(1);
+    let mgr = state.manager.clone();
+    tokio::task::spawn_blocking(move || {
+        mgr.bind_macro_key(&id, slot, &list, macro_index, trigger_mode, rep)
+    })
+    .await
+    .map_err(|e| format!("绑定宏键位异常: {e}"))?
+}
+
+#[tauri::command]
+pub fn macro_record_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    record_mouse: Option<bool>,
+    delay_mode: Option<String>,
+    fixed_delay_ms: Option<u16>,
+) -> Result<Value, String> {
+    state.macro_recorder.start(
+        app,
+        record_mouse.unwrap_or(false),
+        delay_mode.unwrap_or_else(|| "recorded".to_string()),
+        fixed_delay_ms.unwrap_or(20),
+    )?;
+    Ok(json!({ "ok": true, "recording": true }))
+}
+
+#[tauri::command]
+pub fn macro_record_stop(state: State<'_, AppState>) -> Value {
+    let events = state.macro_recorder.stop();
+    json!({
+        "ok": true,
+        "recording": false,
+        "events": events,
+    })
+}
+
+#[tauri::command]
+pub async fn macro_export_file(name: String, macros: Vec<MacroDef>) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let safe_base: String = name
+            .trim()
+            .chars()
+            .map(|c| match c {
+                '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                _ => c,
+            })
+            .collect();
+        let default_name = if safe_base.is_empty() {
+            "redmagic-macros.json".to_string()
+        } else if safe_base.ends_with(".json") {
+            safe_base
+        } else {
+            format!("{safe_base}.json")
+        };
+        let picked = rfd::FileDialog::new()
+            .set_title("导出宏配置")
+            .set_file_name(&default_name)
+            .add_filter("宏配置文件 (JSON)", &["json"])
+            .save_file();
+        let Some(path) = picked else {
+            return Ok(json!({ "canceled": true }));
+        };
+        let payload = MacroLibrary { version: 1, macros };
+        let content = serde_json::to_string_pretty(&payload)
+            .map_err(|e| format!("序列化宏配置失败: {e}"))?;
+        fs::write(&path, content.as_bytes()).map_err(|e| format!("保存宏文件失败: {e}"))?;
+        Ok(json!({ "canceled": false, "filePath": path.to_string_lossy() }))
+    })
+    .await
+    .map_err(|e| format!("导出宏对话框异常: {e}"))?
+}
+
+#[tauri::command]
+pub async fn macro_import_file() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| {
+        let picked = rfd::FileDialog::new()
+            .set_title("导入宏配置（支持 JSON 与官方 Goper .mac）")
+            .add_filter("宏文件 (JSON / MAC)", &["json", "mac"])
+            .add_filter("所有文件", &["*"])
+            .pick_file();
+        let Some(path) = picked else {
+            return Ok(json!({ "canceled": true }));
+        };
+        let content = fs::read_to_string(&path).map_err(|e| format!("读取宏文件失败: {e}"))?;
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("导入的宏");
+        let imported = parse_imported_macros(&content, stem)?;
+        Ok(json!({
+            "canceled": false,
+            "filePath": path.to_string_lossy(),
+            "macros": imported,
+        }))
+    })
+    .await
+    .map_err(|e| format!("导入宏对话框异常: {e}"))?
 }

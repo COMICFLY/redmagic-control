@@ -4,10 +4,13 @@ use serde_json::{json, Value};
 
 use crate::devices::catalog::ConnectionMode;
 use crate::devices::transport::{default_ms_config, Transport, TransportError};
+use crate::protocol::macro_proto::{
+    encode_macro_assignment_hex, encode_macro_table, macro_flash_capacity_from_info, MacroDef,
+};
 use crate::protocol::usage::{build_default_ms_rom, bytes_to_hex3, decode_assignment, hex3_to_bytes};
 use crate::protocol::{
-    POLL_STATUS, READ_CONFIG, READ_INFO, READ_KEYMAP_ROM, READ_KEYMAP_USER, WRITE_CONFIG,
-    WRITE_KEYMAP,
+    DEFAULT_MACRO_FLASH_BYTES, POLL_STATUS, READ_CONFIG, READ_INFO, READ_KEYMAP_ROM,
+    READ_KEYMAP_USER, WRITE_CONFIG, WRITE_KEYMAP, WRITE_MACRO_TABLE,
 };
 
 pub const CONFIG_LEN: usize = 0x54; // 84 字节
@@ -177,6 +180,7 @@ pub struct MouseAdapter {
     pub t: Transport,
     pub link_id: String,
     rom_cache: Option<Vec<u8>>,
+    macro_capacity_bytes: usize,
     last_state: Option<Value>,
 }
 
@@ -186,6 +190,7 @@ impl MouseAdapter {
             t: transport,
             link_id,
             rom_cache: None,
+            macro_capacity_bytes: DEFAULT_MACRO_FLASH_BYTES,
             last_state: cached_state,
         }
     }
@@ -247,6 +252,7 @@ impl MouseAdapter {
             "chargingState": charging_state,
             "capabilityHex": Value::Null,
             "hwKeyCount": KEY_SLOTS,
+            "macroCapacityBytes": self.macro_capacity_bytes,
             "config": decode_ms_config(&default_ms_config()),
             "keymap": keymap,
             "staleConfig": true,
@@ -337,6 +343,7 @@ impl MouseAdapter {
             .as_ref()
             .and_then(|b| (b.len() > 5 && b[5] > 0).then_some(b[5] as usize))
             .unwrap_or(KEY_SLOTS);
+        self.macro_capacity_bytes = macro_flash_capacity_from_info(info_buf.as_deref());
 
         let full = json!({
             "kind": "mouse",
@@ -350,6 +357,7 @@ impl MouseAdapter {
             "chargingState": charging,
             "capabilityHex": capability_hex,
             "hwKeyCount": hw_key_count,
+            "macroCapacityBytes": self.macro_capacity_bytes,
             "config": decode_ms_config(&cfg_buf),
             "keymap": keymap,
             "staleConfig": false,
@@ -439,5 +447,45 @@ impl MouseAdapter {
             "ok": verify == rom,
             "mock": self.t.is_mock(),
         }))
+    }
+
+    pub fn write_macros(&mut self, macros: &[MacroDef]) -> Result<Value, TransportError> {
+        self.ensure_writable()?;
+        if let Ok(info) = self.t.read_blob(READ_INFO, 0x22, 0) {
+            self.macro_capacity_bytes = macro_flash_capacity_from_info(Some(&info));
+        }
+        let capacity = self.macro_capacity_bytes;
+        let blob = encode_macro_table(macros, capacity).map_err(TransportError::Io)?;
+        self.t.write_blob_tx(WRITE_MACRO_TABLE, &blob, 0)?;
+        Ok(json!({
+            "ok": true,
+            "mock": self.t.is_mock(),
+            "bytesWritten": blob.len(),
+            "capacityBytes": capacity,
+            "macroCount": macros.len(),
+        }))
+    }
+
+    pub fn bind_macro_key(
+        &mut self,
+        slot: usize,
+        macros: &[MacroDef],
+        macro_index: usize,
+        trigger_mode: u8,
+        repeat_count: u8,
+    ) -> Result<Value, TransportError> {
+        if macro_index >= macros.len() || macro_index > 255 {
+            return Err(TransportError::Io(format!("无效宏索引：{macro_index}")));
+        }
+        let sync_res = self.write_macros(macros)?;
+        let hex = encode_macro_assignment_hex(macro_index as u8, trigger_mode, repeat_count)
+            .map_err(TransportError::Io)?;
+        let mut key_res = self.write_key(slot, &hex)?;
+        if let Some(obj) = key_res.as_object_mut() {
+            obj.insert("bytesWritten".into(), sync_res["bytesWritten"].clone());
+            obj.insert("capacityBytes".into(), sync_res["capacityBytes"].clone());
+            obj.insert("macroCount".into(), sync_res["macroCount"].clone());
+        }
+        Ok(key_res)
     }
 }

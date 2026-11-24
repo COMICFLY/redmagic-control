@@ -83,11 +83,22 @@
     stopExternalRgbServer: () => safeInvoke("studio_server_stop"),
     exportStudioPreset: (name, content) => safeInvoke("studio_export_preset", { name, content }),
     importStudioPreset: () => safeInvoke("studio_import_preset"),
+    getMacros: () => safeInvoke("macro_list_get"),
+    saveMacros: (macros) => safeInvoke("macro_list_save", { macros }),
+    syncMacros: (id, macros = null) => safeInvoke("macro_sync_device", { id, macros }),
+    bindMacroKey: (id, slot, macroIndex, triggerMode, repeatCount = 1, macros = null) =>
+      safeInvoke("macro_bind_key", { id, slot, macroIndex, triggerMode, repeatCount, macros }),
+    startMacroRecord: (recordMouse = false, delayMode = "recorded", fixedDelayMs = 20) =>
+      safeInvoke("macro_record_start", { recordMouse, delayMode, fixedDelayMs }),
+    stopMacroRecord: () => safeInvoke("macro_record_stop"),
+    exportMacros: (name, macros) => safeInvoke("macro_export_file", { name, macros }),
+    importMacros: () => safeInvoke("macro_import_file"),
     hideToTray: () => safeInvoke("app_hide_to_tray"),
     onScreenProgress: (cb) => bindEvent("screen:progress", cb),
     onUpdateProgress: (cb) => bindEvent("update:progress", cb),
     onDeviceEvent: (cb) => bindEvent("device:event", cb),
     onStudioStopped: (cb) => bindEvent("studio:stopped", cb),
+    onMacroRecordEvent: (cb) => bindEvent("macro:record-event", cb),
     onTrayHidden: (cb) => bindEvent("studio:tray-hidden", cb),
     onTrayShown: (cb) => bindEvent("studio:tray-shown", cb),
     win: {

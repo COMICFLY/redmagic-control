@@ -12,10 +12,10 @@ use crate::devices::hid_win::{enumerate_hid_devices, WinHidDevice};
 use crate::protocol::frame::{build_frame, is_wireless_nack, matches_header, parse_frame, HidFrame};
 use crate::protocol::usage::{build_default_kb_rom, build_default_ms_rom};
 use crate::protocol::{
-    CHUNK_SIZE, CHUNK_SIZE_24G, HEARTBEAT, LOGO_RGB_LEN, POLL_STATUS, PREPARE_SCREEN_IMG,
-    READ_CONFIG, READ_CUSTOM_RGB, READ_INFO, READ_KEYMAP_ROM, READ_KEYMAP_USER, STREAM_KEY_RGB,
-    STREAM_LOGO_RGB, TX_BEGIN, TX_COMMIT, WRITE_CONFIG, WRITE_CUSTOM_RGB, WRITE_KEYMAP,
-    WRITE_SCREEN_GIF_1, WRITE_SCREEN_GIF_2, WRITE_SCREEN_IMG,
+    CHUNK_SIZE, CHUNK_SIZE_24G, DEFAULT_MACRO_FLASH_BYTES, HEARTBEAT, LOGO_RGB_LEN, POLL_STATUS,
+    PREPARE_SCREEN_IMG, READ_CONFIG, READ_CUSTOM_RGB, READ_INFO, READ_KEYMAP_ROM, READ_KEYMAP_USER,
+    STREAM_KEY_RGB, STREAM_LOGO_RGB, TX_BEGIN, TX_COMMIT, WRITE_CONFIG, WRITE_CUSTOM_RGB,
+    WRITE_KEYMAP, WRITE_MACRO_TABLE, WRITE_SCREEN_GIF_1, WRITE_SCREEN_GIF_2, WRITE_SCREEN_IMG,
 };
 
 pub const DEFAULT_KB_INFO_HEX: &str = "aa550000017e180001953332803e64000105014000ac1100";
@@ -81,6 +81,7 @@ pub struct MockState {
     pub direct_logo_rgb: Vec<u8>,
     pub stream_frames: u64,
     pub screen_flash: Vec<u8>,
+    pub macro_flash: Vec<u8>,
     pub max_observed_chunk: usize,
 }
 
@@ -139,6 +140,7 @@ impl MockState {
             } else {
                 Vec::new()
             },
+            macro_flash: vec![0u8; DEFAULT_MACRO_FLASH_BYTES],
             max_observed_chunk: 0,
         }
     }
@@ -416,6 +418,16 @@ impl Transport {
                             if off_u < m.user_keymap.len() {
                                 let n = len.min(p.len()).min(m.user_keymap.len() - off_u);
                                 m.user_keymap[off_u..off_u + n].copy_from_slice(&p[..n]);
+                            }
+                            let n = len.min(p.len()).min(out.len());
+                            out[..n].copy_from_slice(&p[..n]);
+                        }
+                    }
+                    WRITE_MACRO_TABLE => {
+                        if let Some(p) = payload {
+                            if off_u < m.macro_flash.len() {
+                                let n = len.min(p.len()).min(m.macro_flash.len() - off_u);
+                                m.macro_flash[off_u..off_u + n].copy_from_slice(&p[..n]);
                             }
                             let n = len.min(p.len()).min(out.len());
                             out[..n].copy_from_slice(&p[..n]);

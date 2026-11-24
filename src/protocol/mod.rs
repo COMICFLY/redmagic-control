@@ -1,6 +1,7 @@
 //! REDMAGIC / Eevision (NeoUSBlib) USB & 2.4G HID 协议指令表与帧编解码。
 
 pub mod frame;
+pub mod macro_proto;
 pub mod usage;
 
 pub const REPORT_ID: u8 = 0x04;
@@ -41,6 +42,10 @@ pub const KB_MODE_DIRECT: u8 = 29;
 pub const KB_LOGO_MODE_DIRECT: u8 = 5;
 pub const LOGO_LED_COUNT: usize = 20;
 pub const LOGO_RGB_LEN: usize = LOGO_LED_COUNT * 3; // 60 字节
+
+// 板载宏表写入（OP 0x15 主宏表，容量由 READ_INFO[6] << 7 给出）
+pub const WRITE_MACRO_TABLE: u8 = 0x15;
+pub const DEFAULT_MACRO_FLASH_BYTES: usize = 3072; // 0x18 * 128 = 3072B
 
 // 扩展与小屏指令（严禁调用 0x22 / 0x24 / 0x2A 出厂字库擦写指令！）
 pub const WRITE_SCREEN_GIF_1: u8 = 0x21;

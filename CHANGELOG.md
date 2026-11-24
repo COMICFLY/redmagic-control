@@ -5,6 +5,15 @@ All notable changes to **REDMAGIC Control** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-11-24
+
+### Added
+- **Complete Onboard Hardware Macro System for `GK001S` & `GS001S` (`src/protocol/macro_proto.rs`, `src/macros.rs`, `keyboard.rs`, `mouse.rs`, `panels.js`, `app.js`)**:
+  - Implemented the official `OP 0x15` (`WRITE_MACRO_TABLE`) packed binary macro table encoder (`0x55AA` 16B header + offset directory + 4-byte events covering standard keys `0x0A`, modifiers `0x09`, mouse buttons `0x01`, and relative X/Y moves `0x04`/`0x05`) with live Flash capacity calculation from `READ_INFO[6] << 7` (`3,072 B` on both `GK001S` & `GS001S`) and overflow protection.
+  - Added full `OP 0x09` 3-byte macro keymap binding encode/decode supporting all 5 official trigger modes: `单次执行` (`70 XX 00`), `释放停止` (`70 XX 01`), `按下开关` (`70 XX 02`), `释放立即停止` (`70 XX 03`), and `播放指定次数 1..255` (`71 XX NN`).
+  - Built a dedicated **宏管理** workbench shared across keyboard and mouse with atomic local library persistence (`%LOCALAPPDATA%\com.redmagic.control.rs\macros.json`), 500Hz low-latency keyboard + mouse recorder (`GetAsyncKeyState`, zero global hook injection), real/fixed/zero delay modes, quick key/mouse/XY-move insertion, inline action & millisecond delay editing, reordering, Flash capacity meter, and JSON + official Goper `.mac` import/export.
+  - Integrated **`宏`** category directly into **按键映射** for both keyboard and mouse: binding a macro automatically syncs the onboard macro table (`OP 0x15`) and writes the key slot (`OP 0x09`) in one click, and displays macro names and keycap badges (`M1`, `M2`, ...).
+
 ## [0.8.0] - 2026-11-22
 
 ### Added
